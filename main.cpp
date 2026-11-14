@@ -27,16 +27,49 @@ static void Log(const char* fmt, ...)
 
 static void OpenLog()
 {
-    const char* paths[] = {
-        "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files/vsl_probe.log",
-        "/sdcard/Android/data/com.rockstargames.gtasa/files/vsl_probe.log",
-        "/data/data/com.rockstargames.gtasa/files/vsl_probe.log",
-    };
-    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i)
+    // nama paket game dari /proc/self/cmdline
+    char pkg[200] = "com.rockstargames.gtasa";
+    FILE* c = fopen("/proc/self/cmdline", "r");
+    if (c)
+    {
+        char tmp[200] = {0};
+        size_t n = fread(tmp, 1, sizeof(tmp) - 1, c);
+        fclose(c);
+        if (n > 0 && tmp[0]) snprintf(pkg, sizeof(pkg), "%s", tmp);
+    }
+    char paths[4][400];
+    snprintf(paths[0], sizeof(paths[0]), "/storage/emulated/0/Android/data/%s/files/vsl_probe.log", pkg);
+    snprintf(paths[1], sizeof(paths[1]), "/sdcard/Android/data/%s/files/vsl_probe.log", pkg);
+    snprintf(paths[2], sizeof(paths[2]), "/storage/emulated/0/Download/vsl_probe.log");
+    snprintf(paths[3], sizeof(paths[3]), "/data/data/%s/files/vsl_probe.log", pkg);
+    for (int i = 0; i < 4; ++i)
     {
         g_log = fopen(paths[i], "w");
-        if (g_log) { Log("log file: %s", paths[i]); return; }
+        if (g_log) { Log("paket: %s", pkg); Log("log file: %s", paths[i]); return; }
     }
+}
+
+// catat semua file .so yang termuat di proses (nama unik)
+static void DumpLibs()
+{
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return;
+    char line[1024];
+    char last[512] = {0};
+    int shown = 0;
+    while (fgets(line, sizeof(line), f) && shown < 120)
+    {
+        if (!strstr(line, ".so")) continue;
+        char* p = strchr(line, '/');
+        if (!p) continue;
+        size_t n = strlen(p);
+        while (n && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' ')) p[--n] = 0;
+        if (strcmp(p, last) == 0) continue;
+        snprintf(last, sizeof(last), "%s", p);
+        Log("LIB %s", p);
+        ++shown;
+    }
+    fclose(f);
 }
 
 // cari path file libGTASA.so dari /proc/self/maps
@@ -146,7 +179,8 @@ static void ScanExports(const char* path)
 extern "C" void OnModLoad()
 {
     OpenLog();
-    Log("== VSL Probe 0.1 mulai ==");
+    Log("== VSL Probe 0.2 mulai ==");
+    DumpLibs();
 
     uintptr_t base = aml->GetLib("libGTASA.so");
     void* h = aml->GetLibHandle("libGTASA.so");
