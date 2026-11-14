@@ -165,8 +165,8 @@ extern "C" void OnModLoad()
     };
     for (size_t i = 0; i < sizeof(syms) / sizeof(syms[0]); ++i)
     {
-        void* p = aml->GetSym(h, syms[i]);
-        Log("%s : %s (%p)", syms[i], p ? "ADA" : "tidak ada", p);
+        uintptr_t p = (uintptr_t)aml->GetSym(h, syms[i]);
+        Log("%s : %s (0x%x)", syms[i], p ? "ADA" : "tidak ada", (unsigned)p);
     }
 
     char path[512];
