@@ -405,6 +405,31 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
         }
     }
     Log("cache: kendaraan=%p atomic=%d material=%d  bohlam ketemu=%d hilang=%d tidak valid=%d", self, col.n, c->nAll, found, missing, bad);
+    static bool diagDone = false;
+    if (!diagDone && found > 0)
+    {
+        diagDone = true;
+        void* ledAtom = c->lamp[0][0].atom;
+        void* bodyFrame = GetFrameFromName(clump, "chassis");
+        void* bodyAtom = nullptr;
+        for (int a = 0; a < col.n; ++a) if (bodyFrame && col.frame[a] == bodyFrame) { bodyAtom = col.atom[a]; break; }
+        if (!bodyAtom && col.n > 0) bodyAtom = col.atom[0];
+        const char* nm2[2] = { "LED", "BODI" };
+        void* at2[2] = { ledAtom, bodyAtom };
+        for (int k = 0; k < 2; ++k)
+        {
+            char lab[64];
+            snprintf(lab, sizeof(lab), "DIAG atomic %s (32 kata)", nm2[k]);
+            DumpWords(lab, at2[k], 128);
+            void* gg = nullptr; uint32_t fl = 0;
+            if (at2[k] && ReadPtr(at2[k], g_lay.atomGeom, &gg) && gg && SafeRead((char*)gg + 8, &fl, 4))
+            {
+                Log("DIAG geometry %s: flags=%08x", nm2[k], (unsigned)fl);
+                snprintf(lab, sizeof(lab), "DIAG geometry %s (16 kata)", nm2[k]);
+                DumpWords(lab, gg, 64);
+            }
+        }
+    }
     if (bad > 0)
     {
         Log("sebagian struktur tidak valid, plugin dimatikan demi keamanan");
@@ -432,6 +457,22 @@ static void SetLedVisible(Cache* c, bool visible)
         }
 }
 
+static void FixLedGeomFlags(Cache* c)
+{
+    for (int g = 0; g < NGROUPS; ++g)
+        for (int i = 0; i < GROUPS[g].npts && i < MAXPTS; ++i)
+        {
+            void* atom = c->lamp[g][i].atom;
+            void* geom = nullptr;
+            if (!atom || !ReadPtr(atom, g_lay.atomGeom, &geom) || !geom) continue;
+            uint32_t f;
+            if (!SafeRead((char*)geom + 8, &f, 4)) continue;
+            f |= 0x40u;      // rpGEOMETRYMODULATEMATERIALCOLOR
+            f &= ~0x08u;     // tanpa prelit (warna vertex bawaan)
+            memcpy((char*)geom + 8, &f, 4);
+        }
+}
+
 static void PaintAllRed(Cache* c)
 {
     for (int k = 0; k < c->nAll; ++k)
@@ -450,6 +491,8 @@ static void ApplyColors(Cache* c)
     if (c->hidden) { SetLedVisible(c, true); c->hidden = false; }
     // mode 3: cat SEMUA material kendaraan merah (cek apakah warna material berpengaruh sama sekali)
     if (g_set.test == 3) { PaintAllRed(c); return; }
+
+    if (g_set.test == 4) FixLedGeomFlags(c);
 
     // diagnostik: apakah warna yang kita tulis frame lalu ditimpa pihak lain?
     const Lamp* first = nullptr;
@@ -472,7 +515,7 @@ static void ApplyColors(Cache* c)
         {
             const Lamp& L = c->lamp[g][i];
             if (L.n <= 0) continue;
-            const uint8_t* col = (g_set.test == 1) ? RED : (g_lit[g][i] ? G.onc : G.offc);
+            const uint8_t* col = (g_set.test == 1 || g_set.test == 4) ? RED : (g_lit[g][i] ? G.onc : G.offc);
             for (int m = 0; m < L.n; ++m)
             {
                 uint8_t* p = (uint8_t*)L.m[m] + g_lay.matColor;
