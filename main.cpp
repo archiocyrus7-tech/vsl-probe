@@ -25,6 +25,7 @@ MYMOD(vsl.huntley.led, VSL Huntley LED, 0.1, VSL port)
   #define OFS_GEOM_MATS   32
   #define OFS_GEOM_NMAT   40
   #define OFS_MAT_COLOR   8
+  #define OFS_FRAME_PARENT 8
 #else
   #define OFS_ENT_CLUMP   0x18  // CEntity::m_pRwObject
   #define OFS_ATOM_PARENT 4     // RwObject::parent (frame milik atomic)
@@ -33,6 +34,7 @@ MYMOD(vsl.huntley.led, VSL Huntley LED, 0.1, VSL port)
   #define OFS_GEOM_MATS   32    // RpGeometry::matList.materials
   #define OFS_GEOM_NMAT   36    // RpGeometry::matList.numMaterials
   #define OFS_MAT_COLOR   4     // RpMaterial::color (RGBA)
+  #define OFS_FRAME_PARENT 4    // RwFrame::object.parent (frame induk)
 #endif
 
 // ---------- log ----------
@@ -89,6 +91,7 @@ struct Settings
     double speed;
     bool wrap;
     int test;
+    bool caseFollow;
     bool on[NGROUPS];
     int ovr[NGROUPS];
 };
@@ -102,6 +105,7 @@ static void DefaultSettings()
     g_set.speed = 1.0;
     g_set.wrap = true;
     g_set.test = 0;
+    g_set.caseFollow = true;
     for (int g = 0; g < NGROUPS; ++g) { g_set.on[g] = true; g_set.ovr[g] = 0; }
 }
 
@@ -117,6 +121,7 @@ static void ReadCfg()
         if (sscanf(line, "enabled=%d", &a) == 1) g_set.enabled = a != 0;
         else if (sscanf(line, "speed=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.speed = fv; }
         else if (sscanf(line, "wrap=%d", &a) == 1) g_set.wrap = a != 0;
+        else if (sscanf(line, "case=%d", &a) == 1) g_set.caseFollow = a != 0;
         else if (sscanf(line, "test=%d", &a) == 1) g_set.test = (a >= 0 && a <= 5) ? a : 0;
         else if (sscanf(line, "g%d=%d,%d", &gi, &a, &b) == 3)
         {
@@ -138,6 +143,7 @@ static void ReadCfg()
 
 // ---------- mesin pola ----------
 static uint8_t g_lit[NGROUPS][MAXPTS];
+static uint8_t g_litAny[NGROUPS];
 static uint32_t g_litStamp = 0;
 static bool g_litValid = false;
 
@@ -147,6 +153,7 @@ static void ComputeLit(uint32_t t)
     for (int g = 0; g < NGROUPS; ++g)
     {
         memset(g_lit[g], 0, MAXPTS);
+        g_litAny[g] = 0;
         if (!g_set.enabled || !g_set.on[g]) continue;
         const Group& G = GROUPS[g];
         int pat = -1;
@@ -180,6 +187,7 @@ static void ComputeLit(uint32_t t)
                 idx = i % n;
             }
             g_lit[g][i] = (row[idx] != '0') ? 1 : 0;
+            if (g_lit[g][i]) g_litAny[g] = 1;
         }
     }
     g_litStamp = t;
@@ -187,7 +195,7 @@ static void ComputeLit(uint32_t t)
 }
 
 // ---------- cache bohlam LED per kendaraan ----------
-struct Lamp { int n; void* m[4]; void* atom; };
+struct Lamp { int n; void* m[4]; void* atom; int cn; void* cm[2]; };
 struct Cache
 {
     void* self;
@@ -385,7 +393,7 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
 
     c->natoms = col.n;
     for (int a = 0; a < col.n; ++a) c->atoms[a] = col.atom[a];
-    int found = 0, missing = 0, bad = 0;
+    int found = 0, missing = 0, bad = 0, linked = 0;
     for (int g = 0; g < NGROUPS; ++g)
     {
         const Group& G = GROUPS[g];
@@ -402,6 +410,24 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             int nm = 0; void** mats = nullptr;
             if (!ReadPtr(atom, g_lay.atomGeom, &geom) || !GeomOk(geom, g_lay, &nm, &mats)) { ++bad; continue; }
             Lamp& L = c->lamp[g][i];
+            // bingkai: atomic yang frame-nya adalah induk frame bohlam
+            void* pf = nullptr;
+            if (ReadPtr(fr, OFS_FRAME_PARENT, &pf) && pf)
+            {
+                for (int a2 = 0; a2 < col.n; ++a2)
+                {
+                    if (col.frame[a2] != pf) continue;
+                    void* g2 = nullptr; int nv2 = 0;
+                    if (!ReadPtr(col.atom[a2], g_lay.atomGeom, &g2) || !g2 || !ReadInt(g2, g_lay.geomNV, &nv2)) break;
+                    if (nv2 != 2342 && nv2 != 2280) break;
+                    int nm2 = 0; void** mats2 = nullptr;
+                    if (!GeomOk(g2, g_lay, &nm2, &mats2)) break;
+                    L.cn = nm2 > 2 ? 2 : nm2;
+                    for (int m2 = 0; m2 < L.cn; ++m2) ReadPtr(mats2, m2 * (int)sizeof(void*), &L.cm[m2]);
+                    ++linked;
+                    break;
+                }
+            }
             L.atom = atom;
             L.n = nm > 4 ? 4 : nm;
             for (int m = 0; m < L.n; ++m) ReadPtr(mats, m * (int)sizeof(void*), &L.m[m]);
@@ -430,7 +456,7 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
                 if (ReadPtr(mats, m * (int)sizeof(void*), &mp) && mp) c->caseMat[c->nCase++] = mp;
             }
         }
-        Log("bingkai LED: atomic=%d material=%d", cases, c->nCase);
+        Log("bingkai LED: atomic=%d material=%d  terhubung ke bohlam=%d", cases, c->nCase, linked);
     }
     static bool diagDone = false;
     if (!diagDone && found > 0)
@@ -557,6 +583,18 @@ static void ApplyColors(Cache* c)
                 p[0] = col[0]; p[1] = col[1]; p[2] = col[2];   // alpha tidak diubah
             }
             if (&L == first) { memcpy(g_lastCol, col, 3); g_haveLast = true; }
+            if (L.cn > 0 && g_set.test != 1 && g_set.test != 4)
+            {
+                static const uint8_t BLACK[3] = { 0, 0, 0 };    // warna asli bingkai di DFF
+                bool shared = G.npts <= 4;                      // batang LED: satu bingkai untuk 4 bohlam
+                bool lit = shared ? (g_litAny[g] != 0) : (g_lit[g][i] != 0);
+                const uint8_t* cc = (g_set.caseFollow && lit) ? G.onc : BLACK;
+                for (int m = 0; m < L.cn; ++m)
+                {
+                    uint8_t* p = (uint8_t*)L.cm[m] + g_lay.matColor;
+                    p[0] = cc[0]; p[1] = cc[1]; p[2] = cc[2];
+                }
+            }
         }
     }
 }
