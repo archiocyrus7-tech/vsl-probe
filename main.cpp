@@ -117,7 +117,7 @@ static void ReadCfg()
         if (sscanf(line, "enabled=%d", &a) == 1) g_set.enabled = a != 0;
         else if (sscanf(line, "speed=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.speed = fv; }
         else if (sscanf(line, "wrap=%d", &a) == 1) g_set.wrap = a != 0;
-        else if (sscanf(line, "test=%d", &a) == 1) g_set.test = (a >= 0 && a <= 2) ? a : 0;
+        else if (sscanf(line, "test=%d", &a) == 1) g_set.test = (a >= 0 && a <= 4) ? a : 0;
         else if (sscanf(line, "g%d=%d,%d", &gi, &a, &b) == 3)
         {
             if (gi >= 1 && gi <= NGROUPS)
@@ -318,6 +318,8 @@ static bool AutoDetectLayout(void* atom, void* geomHint)
     return false;
 }
 
+static void FixLedGeomFlags(Cache* c);
+
 static Cache* BuildCache(void* self, void* clump, void* probe)
 {
     Cache* c = nullptr;
@@ -405,6 +407,7 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
         }
     }
     Log("cache: kendaraan=%p atomic=%d material=%d  bohlam ketemu=%d hilang=%d tidak valid=%d", self, col.n, c->nAll, found, missing, bad);
+    if (found > 0) FixLedGeomFlags(c);
     static bool diagDone = false;
     if (!diagDone && found > 0)
     {
