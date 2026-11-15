@@ -9,6 +9,9 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <math.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 #include "vsl_data.h"
 
 MYMOD(vsl.huntley.led, VSL Huntley LED, 0.1, VSL port)
@@ -200,18 +203,105 @@ static void* CollectCB(void* atomic, void* data)
     return atomic;
 }
 
-static bool GeomLooksValid(void* geom)
+// ---------- baca memori dengan aman (tidak crash kalau alamat tidak valid) ----------
+static bool SafeRead(const void* src, void* dst, size_t n)
+{
+    static int pfd[2] = {-1, -1};
+    if (!src || n == 0 || n > 4096) return false;
+    if (pfd[0] < 0)
+    {
+        if (pipe(pfd) != 0) { pfd[0] = pfd[1] = -1; return false; }
+    }
+    ssize_t w = write(pfd[1], src, n);
+    if (w < 0) return false;
+    if ((size_t)w != n)
+    {
+        char tmp[4096];
+        if (read(pfd[0], tmp, (size_t)w) < 0) {}
+        return false;
+    }
+    return read(pfd[0], dst, n) == (ssize_t)n;
+}
+
+static bool ReadPtr(const void* base, int ofs, void** out)
+{
+    return SafeRead((const char*)base + ofs, out, sizeof(void*));
+}
+static bool ReadInt(const void* base, int ofs, int* out)
+{
+    return SafeRead((const char*)base + ofs, out, sizeof(int));
+}
+
+// letak field struktur RenderWare (bisa dikoreksi otomatis kalau tebakan awal salah)
+struct Layout { int atomGeom, geomNV, geomMats, geomNMat, matColor; };
+static Layout g_lay = { OFS_ATOM_GEOM, OFS_GEOM_NVERT, OFS_GEOM_MATS, OFS_GEOM_NMAT, OFS_MAT_COLOR };
+static bool g_layChecked = false;
+
+// cek geometry lewat layout tertentu; kalau valid isi jumlah & daftar material
+static bool GeomOk(void* geom, const Layout& L, int* nmOut, void*** matsOut)
 {
     if (!geom || ((uintptr_t)geom & 3)) return false;
-    int nv = *(int*)((char*)geom + OFS_GEOM_NVERT);
-    int nm = *(int*)((char*)geom + OFS_GEOM_NMAT);
-    void** mats = *(void***)((char*)geom + OFS_GEOM_MATS);
-    if (nv < 1 || nv > 200000) return false;
-    if (nm < 1 || nm > 32) return false;
-    if (!mats || ((uintptr_t)mats & 3)) return false;
+    int nv = 0, nm = 0;
+    void** mats = nullptr;
+    if (!ReadInt(geom, L.geomNV, &nv) || nv < 1 || nv > 200000) return false;
+    if (!ReadInt(geom, L.geomNMat, &nm) || nm < 1 || nm > 32) return false;
+    if (!ReadPtr(geom, L.geomMats, (void**)&mats) || !mats || ((uintptr_t)mats & 3)) return false;
     for (int i = 0; i < nm; ++i)
-        if (!mats[i] || ((uintptr_t)mats[i] & 3)) return false;
+    {
+        void* m = nullptr;
+        char probe[16];
+        if (!ReadPtr(mats, i * (int)sizeof(void*), &m) || !m || ((uintptr_t)m & 3)) return false;
+        if (!SafeRead(m, probe, sizeof(probe))) return false;
+    }
+    *nmOut = nm;
+    *matsOut = mats;
     return true;
+}
+
+// log mentah beberapa kata memori supaya struktur bisa dianalisis
+static void DumpWords(const char* label, const void* p, int bytes)
+{
+    unsigned char buf[256];
+    if (bytes > 256) bytes = 256;
+    if (!p || !SafeRead(p, buf, (size_t)bytes)) { Log("%s: tidak terbaca (%p)", label, p); return; }
+    char line[600]; int n = 0;
+    for (int i = 0; i + 3 < bytes; i += 4)
+    {
+        uint32_t w; memcpy(&w, buf + i, 4);
+        n += snprintf(line + n, sizeof(line) - n, "%08x ", (unsigned)w);
+        if (n > (int)sizeof(line) - 12) break;
+    }
+    Log("%s: %s", label, line);
+}
+
+static bool AutoDetectLayout(void* atom, void* geomHint)
+{
+    static const int aoffs[] = { 20, 16, 24, 28, 32, 36, 40, 12, 44 };
+    static const int moffs[] = { 32, 36, 40, 44, 28, 48 };
+    static const int voffs[] = { 20, 16, 24, 28, 32 };
+    for (size_t ai = 0; ai < sizeof(aoffs) / sizeof(aoffs[0]); ++ai)
+    {
+        void* g = nullptr;
+        if (!ReadPtr(atom, aoffs[ai], &g) || !g) continue;
+        for (size_t mi = 0; mi < sizeof(moffs) / sizeof(moffs[0]); ++mi)
+            for (size_t vi = 0; vi < sizeof(voffs) / sizeof(voffs[0]); ++vi)
+            {
+                Layout L = g_lay;
+                L.atomGeom = aoffs[ai];
+                L.geomMats = moffs[mi];
+                L.geomNMat = moffs[mi] + (int)sizeof(void*);
+                L.geomNV = voffs[vi];
+                int nm; void** mats;
+                if (GeomOk(g, L, &nm, &mats))
+                {
+                    g_lay = L;
+                    Log("layout otomatis: atomGeom=%d nverts=%d mats=%d nmat=%d", L.atomGeom, L.geomNV, L.geomMats, L.geomNMat);
+                    return true;
+                }
+            }
+    }
+    (void)geomHint;
+    return false;
 }
 
 static Cache* BuildCache(void* self, void* clump, void* probe)
@@ -226,6 +316,42 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
     col.n = 0;
     ForAllAtomics(clump, CollectCB, &col);
 
+    // atomic LED pertama dipakai untuk memeriksa / menebak letak struktur
+    if (!g_layChecked)
+    {
+        g_layChecked = true;
+        void* fr = GetFrameFromName(clump, "lightbar-led-1");
+        void* atom = nullptr;
+        for (int a = 0; a < col.n; ++a) if (col.frame[a] == fr) { atom = col.atom[a]; break; }
+        if (!atom) { Log("atomic untuk lightbar-led-1 tidak ketemu"); g_layChecked = false; c->valid = false; return c; }
+        Log("atomic LED = %p", atom);
+        DumpWords("  atomic (16 kata)", atom, 64);
+        void* g0 = nullptr;
+        if (ReadPtr(atom, g_lay.atomGeom, &g0)) DumpWords("  geometry (24 kata)", g0, 96);
+        int nm = 0; void** mats = nullptr;
+        bool ok = (((uint8_t*)atom)[0] == 1) && GeomOk(g0, g_lay, &nm, &mats);
+        Log("layout standar %s", ok ? "COCOK" : "tidak cocok");
+        if (!ok) ok = AutoDetectLayout(atom, g0);
+        if (ok)
+        {
+            void* g1 = nullptr;
+            ReadPtr(atom, g_lay.atomGeom, &g1);
+            if (GeomOk(g1, g_lay, &nm, &mats))
+            {
+                void* m0 = nullptr;
+                ReadPtr(mats, 0, &m0);
+                DumpWords("  material pertama (8 kata)", m0, 32);
+            }
+        }
+        else
+        {
+            Log("layout tidak ketemu, plugin dimatikan demi keamanan");
+            g_ok = false;
+            c->valid = false;
+            return c;
+        }
+    }
+
     int found = 0, missing = 0, bad = 0;
     for (int g = 0; g < NGROUPS; ++g)
     {
@@ -239,21 +365,19 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             if (fr) for (int a = 0; a < col.n; ++a) if (col.frame[a] == fr) { k = a; break; }
             if (k < 0) { ++missing; continue; }
             void* atom = col.atom[k];
-            if (((uint8_t*)atom)[0] != 1) { ++bad; continue; }   // bukan rpATOMIC
-            void* geom = *(void**)((char*)atom + OFS_ATOM_GEOM);
-            if (!GeomLooksValid(geom)) { ++bad; continue; }
-            int nm = *(int*)((char*)geom + OFS_GEOM_NMAT);
-            void** mats = *(void***)((char*)geom + OFS_GEOM_MATS);
+            void* geom = nullptr;
+            int nm = 0; void** mats = nullptr;
+            if (!ReadPtr(atom, g_lay.atomGeom, &geom) || !GeomOk(geom, g_lay, &nm, &mats)) { ++bad; continue; }
             Lamp& L = c->lamp[g][i];
             L.n = nm > 4 ? 4 : nm;
-            for (int m = 0; m < L.n; ++m) L.m[m] = mats[m];
+            for (int m = 0; m < L.n; ++m) ReadPtr(mats, m * (int)sizeof(void*), &L.m[m]);
             ++found;
         }
     }
-    Log("cache: kendaraan=%p clump=%p atomic=%d  bohlam ketemu=%d hilang=%d tidak valid=%d", self, clump, col.n, found, missing, bad);
+    Log("cache: kendaraan=%p atomic=%d  bohlam ketemu=%d hilang=%d tidak valid=%d", self, col.n, found, missing, bad);
     if (bad > 0)
     {
-        Log("struktur memori tidak cocok, plugin dimatikan demi keamanan");
+        Log("sebagian struktur tidak valid, plugin dimatikan demi keamanan");
         g_ok = false;
         c->valid = false;
         return c;
@@ -274,7 +398,7 @@ static void ApplyColors(Cache* c)
             const uint8_t* col = g_lit[g][i] ? G.onc : G.offc;
             for (int m = 0; m < L.n; ++m)
             {
-                uint8_t* p = (uint8_t*)L.m[m] + OFS_MAT_COLOR;
+                uint8_t* p = (uint8_t*)L.m[m] + g_lay.matColor;
                 p[0] = col[0]; p[1] = col[1]; p[2] = col[2];   // alpha tidak diubah
             }
         }
