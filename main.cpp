@@ -117,7 +117,7 @@ static void ReadCfg()
         if (sscanf(line, "enabled=%d", &a) == 1) g_set.enabled = a != 0;
         else if (sscanf(line, "speed=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.speed = fv; }
         else if (sscanf(line, "wrap=%d", &a) == 1) g_set.wrap = a != 0;
-        else if (sscanf(line, "test=%d", &a) == 1) g_set.test = (a >= 0 && a <= 4) ? a : 0;
+        else if (sscanf(line, "test=%d", &a) == 1) g_set.test = (a >= 0 && a <= 5) ? a : 0;
         else if (sscanf(line, "g%d=%d,%d", &gi, &a, &b) == 3)
         {
             if (gi >= 1 && gi <= NGROUPS)
@@ -199,6 +199,8 @@ struct Cache
     void* atoms[512];
     int nAll;
     void* allMat[640];
+    int nCase;
+    void* caseMat[256];
     Lamp lamp[NGROUPS][MAXPTS];
 };
 static Cache g_cache[16];
@@ -408,6 +410,28 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
     }
     Log("cache: kendaraan=%p atomic=%d material=%d  bohlam ketemu=%d hilang=%d tidak valid=%d", self, col.n, c->nAll, found, missing, bad);
     if (found > 0) FixLedGeomFlags(c);
+    // bingkai bohlam ("led-case" = 2342 vertex, "led berjejer*" = 2280 vertex): nyalakan flag kalikan-warna agar tampil sesuai warna materialnya
+    {
+        int cases = 0;
+        for (int a = 0; a < col.n; ++a)
+        {
+            void* geom = nullptr;
+            int nv = 0;
+            if (!ReadPtr(col.atom[a], g_lay.atomGeom, &geom) || !geom || !ReadInt(geom, g_lay.geomNV, &nv)) continue;
+            if (nv != 2342 && nv != 2280) continue;
+            int nm = 0; void** mats = nullptr;
+            if (!GeomOk(geom, g_lay, &nm, &mats)) continue;
+            uint32_t f;
+            if (SafeRead((char*)geom + 8, &f, 4)) { f |= 0x40u; memcpy((char*)geom + 8, &f, 4); }
+            ++cases;
+            for (int m = 0; m < nm && c->nCase < 256; ++m)
+            {
+                void* mp = nullptr;
+                if (ReadPtr(mats, m * (int)sizeof(void*), &mp) && mp) c->caseMat[c->nCase++] = mp;
+            }
+        }
+        Log("bingkai LED: atomic=%d material=%d", cases, c->nCase);
+    }
     static bool diagDone = false;
     if (!diagDone && found > 0)
     {
@@ -496,6 +520,14 @@ static void ApplyColors(Cache* c)
     if (g_set.test == 3) { PaintAllRed(c); return; }
 
     if (g_set.test == 4) FixLedGeomFlags(c);
+    if (g_set.test == 5)
+    {
+        for (int k = 0; k < c->nCase; ++k)
+        {
+            uint8_t* p = (uint8_t*)c->caseMat[k] + g_lay.matColor;
+            p[0] = 255; p[1] = 0; p[2] = 0;
+        }
+    }
 
     // diagnostik: apakah warna yang kita tulis frame lalu ditimpa pihak lain?
     const Lamp* first = nullptr;
