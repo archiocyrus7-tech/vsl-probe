@@ -105,7 +105,7 @@ static void DefaultSettings()
     g_set.speed = 1.0;
     g_set.wrap = true;
     g_set.test = 0;
-    g_set.caseFollow = true;
+    g_set.caseFollow = false;   // bawaan PC: bingkai hitam terus
     for (int g = 0; g < NGROUPS; ++g) { g_set.on[g] = true; g_set.ovr[g] = 0; }
 }
 
