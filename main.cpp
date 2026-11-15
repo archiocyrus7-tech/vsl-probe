@@ -187,16 +187,16 @@ static void ComputeLit(uint32_t t)
 }
 
 // ---------- cache bohlam LED per kendaraan ----------
-struct Lamp { int n; void* m[4]; };
+struct Lamp { int n; void* m[4]; void* atom; };
 struct Cache
 {
     void* self;
     void* clump;
     void* probe;
     bool valid;
-    bool haveLast;
-    uint8_t last[3];
-    int overwrites;
+    bool hidden;
+    int natoms;
+    void* atoms[512];
     int nAll;
     void* allMat[640];
     Lamp lamp[NGROUPS][MAXPTS];
@@ -379,6 +379,8 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
         }
     }
 
+    c->natoms = col.n;
+    for (int a = 0; a < col.n; ++a) c->atoms[a] = col.atom[a];
     int found = 0, missing = 0, bad = 0;
     for (int g = 0; g < NGROUPS; ++g)
     {
@@ -396,6 +398,7 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             int nm = 0; void** mats = nullptr;
             if (!ReadPtr(atom, g_lay.atomGeom, &geom) || !GeomOk(geom, g_lay, &nm, &mats)) { ++bad; continue; }
             Lamp& L = c->lamp[g][i];
+            L.atom = atom;
             L.n = nm > 4 ? 4 : nm;
             for (int m = 0; m < L.n; ++m) ReadPtr(mats, m * (int)sizeof(void*), &L.m[m]);
             ++found;
@@ -413,33 +416,55 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
     return c;
 }
 
+static bool g_haveLast = false;
+static uint8_t g_lastCol[3] = {0, 0, 0};
+static int g_prevTest = -1;
+
+static void SetLedVisible(Cache* c, bool visible)
+{
+    for (int g = 0; g < NGROUPS; ++g)
+        for (int i = 0; i < GROUPS[g].npts && i < MAXPTS; ++i)
+        {
+            void* atom = c->lamp[g][i].atom;
+            if (!atom) continue;
+            uint8_t* flags = (uint8_t*)atom + 2;      // RwObject::flags, bit 4 = rpATOMICRENDER
+            if (visible) *flags |= 0x04; else *flags &= (uint8_t)~0x04;
+        }
+}
+
+static void PaintAllRed(Cache* c)
+{
+    for (int k = 0; k < c->nAll; ++k)
+    {
+        uint8_t* p = (uint8_t*)c->allMat[k] + g_lay.matColor;
+        p[0] = 255; p[1] = 0; p[2] = 0;
+    }
+}
+
 static void ApplyColors(Cache* c)
 {
+    if (g_prevTest != g_set.test) { Log("mode tes -> %d", g_set.test); g_prevTest = g_set.test; }
+
+    // mode 2: sembunyikan atomic LED (cek apakah kotak yang kelihatan memang atomic LED)
+    if (g_set.test == 2) { SetLedVisible(c, false); c->hidden = true; return; }
+    if (c->hidden) { SetLedVisible(c, true); c->hidden = false; }
+    // mode 3: cat SEMUA material kendaraan merah (cek apakah warna material berpengaruh sama sekali)
+    if (g_set.test == 3) { PaintAllRed(c); return; }
+
     // diagnostik: apakah warna yang kita tulis frame lalu ditimpa pihak lain?
     const Lamp* first = nullptr;
     for (int g = 0; g < NGROUPS && !first; ++g)
         for (int i = 0; i < GROUPS[g].npts && i < MAXPTS; ++i)
             if (c->lamp[g][i].n > 0) { first = &c->lamp[g][i]; break; }
-    if (first && c->haveLast)
+    static int overwrites = 0;
+    if (first && g_haveLast)
     {
         const uint8_t* cur = (const uint8_t*)first->m[0] + g_lay.matColor;
-        if (memcmp(cur, c->last, 3) != 0)
-        {
-            ++c->overwrites;
-            if (c->overwrites <= 6)
-                Log("warna ditimpa pihak lain: ditulis=%02x%02x%02x terbaca=%02x%02x%02x", c->last[0], c->last[1], c->last[2], cur[0], cur[1], cur[2]);
-        }
+        if (memcmp(cur, g_lastCol, 3) != 0 && ++overwrites <= 6)
+            Log("warna ditimpa pihak lain: ditulis=%02x%02x%02x terbaca=%02x%02x%02x", g_lastCol[0], g_lastCol[1], g_lastCol[2], cur[0], cur[1], cur[2]);
     }
 
     static const uint8_t RED[3] = { 255, 0, 0 };
-    if (g_set.test == 2)
-    {
-        for (int k = 0; k < c->nAll; ++k)
-        {
-            uint8_t* p = (uint8_t*)c->allMat[k] + g_lay.matColor;
-            p[0] = 255; p[1] = 0; p[2] = 0;
-        }
-    }
     for (int g = 0; g < NGROUPS; ++g)
     {
         const Group& G = GROUPS[g];
@@ -447,13 +472,13 @@ static void ApplyColors(Cache* c)
         {
             const Lamp& L = c->lamp[g][i];
             if (L.n <= 0) continue;
-            const uint8_t* col = g_set.test ? RED : (g_lit[g][i] ? G.onc : G.offc);
+            const uint8_t* col = (g_set.test == 1) ? RED : (g_lit[g][i] ? G.onc : G.offc);
             for (int m = 0; m < L.n; ++m)
             {
                 uint8_t* p = (uint8_t*)L.m[m] + g_lay.matColor;
                 p[0] = col[0]; p[1] = col[1]; p[2] = col[2];   // alpha tidak diubah
             }
-            if (&L == first) { memcpy(c->last, col, 3); c->haveLast = true; }
+            if (&L == first) { memcpy(g_lastCol, col, 3); g_haveLast = true; }
         }
     }
 }
