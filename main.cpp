@@ -88,6 +88,7 @@ struct Settings
     bool enabled;
     double speed;
     bool wrap;
+    bool test;
     bool on[NGROUPS];
     int ovr[NGROUPS];
 };
@@ -100,6 +101,7 @@ static void DefaultSettings()
     g_set.enabled = true;
     g_set.speed = 1.0;
     g_set.wrap = true;
+    g_set.test = false;
     for (int g = 0; g < NGROUPS; ++g) { g_set.on[g] = true; g_set.ovr[g] = 0; }
 }
 
@@ -115,6 +117,7 @@ static void ReadCfg()
         if (sscanf(line, "enabled=%d", &a) == 1) g_set.enabled = a != 0;
         else if (sscanf(line, "speed=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.speed = fv; }
         else if (sscanf(line, "wrap=%d", &a) == 1) g_set.wrap = a != 0;
+        else if (sscanf(line, "test=%d", &a) == 1) g_set.test = a != 0;
         else if (sscanf(line, "g%d=%d,%d", &gi, &a, &b) == 3)
         {
             if (gi >= 1 && gi <= NGROUPS)
@@ -185,6 +188,9 @@ struct Cache
     void* clump;
     void* probe;
     bool valid;
+    bool haveLast;
+    uint8_t last[3];
+    int overwrites;
     Lamp lamp[NGROUPS][MAXPTS];
 };
 static Cache g_cache[16];
@@ -388,6 +394,23 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
 
 static void ApplyColors(Cache* c)
 {
+    // diagnostik: apakah warna yang kita tulis frame lalu ditimpa pihak lain?
+    const Lamp* first = nullptr;
+    for (int g = 0; g < NGROUPS && !first; ++g)
+        for (int i = 0; i < GROUPS[g].npts && i < MAXPTS; ++i)
+            if (c->lamp[g][i].n > 0) { first = &c->lamp[g][i]; break; }
+    if (first && c->haveLast)
+    {
+        const uint8_t* cur = (const uint8_t*)first->m[0] + g_lay.matColor;
+        if (memcmp(cur, c->last, 3) != 0)
+        {
+            ++c->overwrites;
+            if (c->overwrites <= 6)
+                Log("warna ditimpa pihak lain: ditulis=%02x%02x%02x terbaca=%02x%02x%02x", c->last[0], c->last[1], c->last[2], cur[0], cur[1], cur[2]);
+        }
+    }
+
+    static const uint8_t RED[3] = { 255, 0, 0 };
     for (int g = 0; g < NGROUPS; ++g)
     {
         const Group& G = GROUPS[g];
@@ -395,12 +418,13 @@ static void ApplyColors(Cache* c)
         {
             const Lamp& L = c->lamp[g][i];
             if (L.n <= 0) continue;
-            const uint8_t* col = g_lit[g][i] ? G.onc : G.offc;
+            const uint8_t* col = g_set.test ? RED : (g_lit[g][i] ? G.onc : G.offc);
             for (int m = 0; m < L.n; ++m)
             {
                 uint8_t* p = (uint8_t*)L.m[m] + g_lay.matColor;
                 p[0] = col[0]; p[1] = col[1]; p[2] = col[2];   // alpha tidak diubah
             }
+            if (&L == first) { memcpy(c->last, col, 3); c->haveLast = true; }
         }
     }
 }
