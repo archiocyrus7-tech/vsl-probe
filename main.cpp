@@ -88,7 +88,7 @@ struct Settings
     bool enabled;
     double speed;
     bool wrap;
-    bool test;
+    int test;
     bool on[NGROUPS];
     int ovr[NGROUPS];
 };
@@ -101,7 +101,7 @@ static void DefaultSettings()
     g_set.enabled = true;
     g_set.speed = 1.0;
     g_set.wrap = true;
-    g_set.test = false;
+    g_set.test = 0;
     for (int g = 0; g < NGROUPS; ++g) { g_set.on[g] = true; g_set.ovr[g] = 0; }
 }
 
@@ -117,7 +117,7 @@ static void ReadCfg()
         if (sscanf(line, "enabled=%d", &a) == 1) g_set.enabled = a != 0;
         else if (sscanf(line, "speed=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.speed = fv; }
         else if (sscanf(line, "wrap=%d", &a) == 1) g_set.wrap = a != 0;
-        else if (sscanf(line, "test=%d", &a) == 1) g_set.test = a != 0;
+        else if (sscanf(line, "test=%d", &a) == 1) g_set.test = (a >= 0 && a <= 2) ? a : 0;
         else if (sscanf(line, "g%d=%d,%d", &gi, &a, &b) == 3)
         {
             if (gi >= 1 && gi <= NGROUPS)
@@ -128,6 +128,12 @@ static void ReadCfg()
         }
     }
     fclose(f);
+    static int lastE = -1, lastT = -1;
+    if (lastE != (int)g_set.enabled || lastT != g_set.test)
+    {
+        lastE = (int)g_set.enabled; lastT = g_set.test;
+        Log("cfg dibaca: enabled=%d test=%d speed=%.2f", (int)g_set.enabled, g_set.test, g_set.speed);
+    }
 }
 
 // ---------- mesin pola ----------
@@ -191,6 +197,8 @@ struct Cache
     bool haveLast;
     uint8_t last[3];
     int overwrites;
+    int nAll;
+    void* allMat[640];
     Lamp lamp[NGROUPS][MAXPTS];
 };
 static Cache g_cache[16];
@@ -358,6 +366,19 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
         }
     }
 
+    // semua material semua atomic (untuk mode tes 2)
+    for (int a = 0; a < col.n; ++a)
+    {
+        void* geom = nullptr;
+        int nm = 0; void** mats = nullptr;
+        if (!ReadPtr(col.atom[a], g_lay.atomGeom, &geom) || !GeomOk(geom, g_lay, &nm, &mats)) continue;
+        for (int m = 0; m < nm && c->nAll < 640; ++m)
+        {
+            void* mp = nullptr;
+            if (ReadPtr(mats, m * (int)sizeof(void*), &mp) && mp) c->allMat[c->nAll++] = mp;
+        }
+    }
+
     int found = 0, missing = 0, bad = 0;
     for (int g = 0; g < NGROUPS; ++g)
     {
@@ -380,7 +401,7 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             ++found;
         }
     }
-    Log("cache: kendaraan=%p atomic=%d  bohlam ketemu=%d hilang=%d tidak valid=%d", self, col.n, found, missing, bad);
+    Log("cache: kendaraan=%p atomic=%d material=%d  bohlam ketemu=%d hilang=%d tidak valid=%d", self, col.n, c->nAll, found, missing, bad);
     if (bad > 0)
     {
         Log("sebagian struktur tidak valid, plugin dimatikan demi keamanan");
@@ -411,6 +432,14 @@ static void ApplyColors(Cache* c)
     }
 
     static const uint8_t RED[3] = { 255, 0, 0 };
+    if (g_set.test == 2)
+    {
+        for (int k = 0; k < c->nAll; ++k)
+        {
+            uint8_t* p = (uint8_t*)c->allMat[k] + g_lay.matColor;
+            p[0] = 255; p[1] = 0; p[2] = 0;
+        }
+    }
     for (int g = 0; g < NGROUPS; ++g)
     {
         const Group& G = GROUPS[g];
