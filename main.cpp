@@ -9,6 +9,8 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <math.h>
+#include <elf.h>
+#include <vector>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -638,6 +640,108 @@ DECL_HOOKv(CVehicle_PreRender, void* self)
     if (g_ok) OnVehiclePreRender(self);
 }
 
+// ---------- cari fungsi corona game (untuk perbaikan corona yang hilang saat bergerak) ----------
+// cari path file libGTASA.so dari /proc/self/maps
+static bool FindLibPath(char* out, size_t outSize)
+{
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return false;
+    char line[1024];
+    bool ok = false;
+    while (fgets(line, sizeof(line), f))
+    {
+        if (!strstr(line, "libGTASA.so")) continue;
+        char* p = strchr(line, '/');
+        if (!p) continue;
+        size_t n = strlen(p);
+        while (n && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' ')) p[--n] = 0;
+        snprintf(out, outSize, "%s", p);
+        ok = true;
+        break;
+    }
+    fclose(f);
+    return ok;
+}
+
+static bool ReadBlock(FILE* f, long fileSize, uint32_t off, uint32_t size, std::vector<char>& out)
+{
+    if (size == 0 || size > 80u * 1024u * 1024u) return false;
+    if ((long)off < 0 || (long)off + (long)size > fileSize) return false;
+    out.resize(size);
+    if (fseek(f, (long)off, SEEK_SET) != 0) return false;
+    return fread(out.data(), 1, size, f) == size;
+}
+
+// baca tabel simbol ekspor (.dynsym) dari file .so dan log nama yang relevan
+static void ScanExports(const char* path)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) { Log("tidak bisa buka %s", path); return; }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    Elf32_Ehdr eh;
+    if (fread(&eh, sizeof(eh), 1, f) != 1 || memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 || eh.e_ident[EI_CLASS] != ELFCLASS32)
+    {
+        Log("bukan ELF 32-bit: %s", path);
+        fclose(f);
+        return;
+    }
+    if (eh.e_shoff == 0 || eh.e_shnum == 0 || eh.e_shentsize != sizeof(Elf32_Shdr))
+    {
+        Log("file tidak punya section header, scan ekspor dilewati");
+        fclose(f);
+        return;
+    }
+    std::vector<char> shraw;
+    if (!ReadBlock(f, sz, eh.e_shoff, (uint32_t)eh.e_shnum * sizeof(Elf32_Shdr), shraw))
+    {
+        Log("gagal baca section header");
+        fclose(f);
+        return;
+    }
+    const Elf32_Shdr* sh = (const Elf32_Shdr*)shraw.data();
+
+    const char* keys[] = { "CCoronas", "RegisterCorona", "Corona" };
+    const int nKeys = (int)(sizeof(keys) / sizeof(keys[0]));
+
+    for (int s = 0; s < eh.e_shnum; ++s)
+    {
+        if (sh[s].sh_type != SHT_DYNSYM) continue;
+        if (sh[s].sh_link >= eh.e_shnum) continue;
+        const Elf32_Shdr& str = sh[sh[s].sh_link];
+        std::vector<char> symraw, strraw;
+        if (!ReadBlock(f, sz, sh[s].sh_offset, sh[s].sh_size, symraw)) { Log("gagal baca dynsym"); continue; }
+        if (!ReadBlock(f, sz, str.sh_offset, str.sh_size, strraw)) { Log("gagal baca dynstr"); continue; }
+        const Elf32_Sym* syms = (const Elf32_Sym*)symraw.data();
+        size_t count = symraw.size() / sizeof(Elf32_Sym);
+        Log("dynsym: %u simbol total", (unsigned)count);
+        int shown = 0;
+        for (size_t i = 0; i < count && shown < 900; ++i)
+        {
+            if (syms[i].st_shndx == SHN_UNDEF) continue;
+            if (syms[i].st_name >= strraw.size()) continue;
+            const char* name = strraw.data() + syms[i].st_name;
+            // pastikan string berakhir di dalam buffer
+            size_t maxLen = strraw.size() - syms[i].st_name;
+            if (strnlen(name, maxLen) == maxLen) continue;
+            for (int k = 0; k < nKeys; ++k)
+            {
+                if (strstr(name, keys[k]))
+                {
+                    Log("EXPORT %s", name);
+                    ++shown;
+                    break;
+                }
+            }
+        }
+        Log("EXPORT dicatat: %d", shown);
+    }
+    fclose(f);
+}
+
+
 ON_MOD_LOAD()
 {
     InitPaths();
@@ -657,4 +761,7 @@ ON_MOD_LOAD()
     g_ok = true;
     HOOKSYM(CVehicle_PreRender, h, "_ZN8CVehicle9PreRenderEv");
     Log("hook CVehicle::PreRender terpasang");
+    char libPath[512];
+    if (FindLibPath(libPath, sizeof(libPath))) ScanExports(libPath);
+    else Log("path libGTASA tidak ketemu di /proc/self/maps");
 }
