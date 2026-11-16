@@ -640,6 +640,45 @@ DECL_HOOKv(CVehicle_PreRender, void* self)
     if (g_ok) OnVehiclePreRender(self);
 }
 
+// ---------- corona dengan ID tetap (supaya tidak hilang saat mobil bergerak) ----------
+// CCoronas::RegisterCorona (varian dengan coronaType) di libGTASA 32-bit:
+//   (id, attachTo, r, g, b, a, CVector const& posn, radius, farClip, coronaType, flareType,
+//    reflectionType, LOSCheck, unused, normalAngle, bNeonFade, pullTowardsCam, bFadeDestroy,
+//    fadeSpeed, bOnlyFromBelow, bWhiteCore)
+typedef void (*RegisterCorona_t)(unsigned int id, void* attachTo,
+    unsigned char r, unsigned char g, unsigned char b, unsigned char a,
+    const float* posn, float radius, float farClip,
+    unsigned char coronaType, unsigned char flareType, unsigned char reflectionType,
+    unsigned char LOSCheck, unsigned char unused, float normalAngle, bool bNeonFade,
+    float pullTowardsCam, bool bFadeDestroy, float fadeSpeed, bool bOnlyFromBelow, bool bWhiteCore);
+static RegisterCorona_t g_RegCorona = nullptr;
+static int g_coronaCalls = 0;
+
+// Dipanggil dari script Lua lewat FFI. Semua argumen bilangan bulat (milimeter) supaya
+// tidak bergantung pada cara bilangan desimal dikirim antar-bahasa.
+extern "C" __attribute__((visibility("default")))
+void VSL_Corona(unsigned int id, int xmm, int ymm, int zmm, int rmm,
+                int r, int g, int b, int type, int flare, int los)
+{
+    if (!g_RegCorona) return;
+    float pos[3] = { xmm * 0.001f, ymm * 0.001f, zmm * 0.001f };
+    g_RegCorona(id, nullptr, (unsigned char)r, (unsigned char)g, (unsigned char)b, 255,
+                pos, rmm * 0.001f, 150.0f, (unsigned char)type, (unsigned char)flare, 0,
+                (unsigned char)los, 0, 0.0f, false, 0.0f, false, 60.0f, false, false);
+    if (g_coronaCalls < 3) { ++g_coronaCalls; Log("VSL_Corona dipanggil: id=%x pos=%.2f,%.2f,%.2f r=%.3f tipe=%d", id, pos[0], pos[1], pos[2], rmm * 0.001f, type); }
+}
+
+static void PublishApi()
+{
+    char p[400];
+    snprintf(p, sizeof(p), "/storage/emulated/0/Android/data/%s/files/vsl_api.txt", g_pkg);
+    FILE* f = fopen(p, "w");
+    if (!f) { Log("tidak bisa menulis %s", p); return; }
+    fprintf(f, "%lu\n", (unsigned long)(uintptr_t)&VSL_Corona);
+    fclose(f);
+    Log("alamat VSL_Corona dipublikasikan ke %s (%p)", p, (void*)&VSL_Corona);
+}
+
 // ---------- cari fungsi corona game (untuk perbaikan corona yang hilang saat bergerak) ----------
 // cari path file libGTASA.so dari /proc/self/maps
 static bool FindLibPath(char* out, size_t outSize)
@@ -761,6 +800,9 @@ ON_MOD_LOAD()
     g_ok = true;
     HOOKSYM(CVehicle_PreRender, h, "_ZN8CVehicle9PreRenderEv");
     Log("hook CVehicle::PreRender terpasang");
+    g_RegCorona = (RegisterCorona_t)aml->GetSym(h, "_ZN8CCoronas14RegisterCoronaEjP7CEntityhhhhRK7CVectorffhhhhhfbfbfbb");
+    Log("CCoronas::RegisterCorona = %p", (void*)g_RegCorona);
+    if (g_RegCorona) PublishApi();
     char libPath[512];
     if (FindLibPath(libPath, sizeof(libPath))) ScanExports(libPath);
     else Log("path libGTASA tidak ketemu di /proc/self/maps");
