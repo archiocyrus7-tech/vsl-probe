@@ -28,6 +28,7 @@ MYMOD(vsl.huntley.led, VSL Huntley LED, 0.1, VSL port)
   #define OFS_GEOM_NMAT   40
   #define OFS_MAT_COLOR   8
   #define OFS_FRAME_PARENT 8
+  #define OFS_FRAME_MAT    16
 #else
   #define OFS_ENT_CLUMP   0x18  // CEntity::m_pRwObject
   #define OFS_ATOM_PARENT 4     // RwObject::parent (frame milik atomic)
@@ -37,6 +38,7 @@ MYMOD(vsl.huntley.led, VSL Huntley LED, 0.1, VSL port)
   #define OFS_GEOM_NMAT   36    // RpGeometry::matList.numMaterials
   #define OFS_MAT_COLOR   4     // RpMaterial::color (RGBA)
   #define OFS_FRAME_PARENT 4    // RwFrame::object.parent (frame induk)
+  #define OFS_FRAME_MAT    16   // RwFrame::modelling (RwMatrix 64 byte: right, up, at, pos)
 #endif
 
 // ---------- log ----------
@@ -94,6 +96,14 @@ struct Settings
     bool wrap;
     int test;
     bool caseFollow;
+    bool corona;
+    bool cull;
+    bool all;
+    int los;
+    float bias;
+    float scale;
+    float gsize[NGROUPS];
+    uint8_t gcol[NGROUPS][3];
     bool on[NGROUPS];
     int ovr[NGROUPS];
 };
@@ -108,6 +118,17 @@ static void DefaultSettings()
     g_set.wrap = true;
     g_set.test = 0;
     g_set.caseFollow = false;   // bawaan PC: bingkai hitam terus
+    g_set.corona = true;
+    g_set.cull = true;
+    g_set.all = false;
+    g_set.los = 0;
+    g_set.bias = -0.40f;
+    g_set.scale = 1.0f;
+    for (int g = 0; g < NGROUPS; ++g)
+    {
+        g_set.gsize[g] = GROUPS[g].size;
+        for (int k = 0; k < 3; ++k) g_set.gcol[g][k] = GROUPS[g].c1[k];
+    }
     for (int g = 0; g < NGROUPS; ++g) { g_set.on[g] = true; g_set.ovr[g] = 0; }
 }
 
@@ -118,12 +139,26 @@ static void ReadCfg()
     char line[128];
     while (fgets(line, sizeof(line), f))
     {
-        int a = 0, b = 0, gi = 0;
+        int a = 0, b = 0, gi = 0, c3 = 0;
         float fv = 0.f;
         if (sscanf(line, "enabled=%d", &a) == 1) g_set.enabled = a != 0;
         else if (sscanf(line, "speed=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.speed = fv; }
         else if (sscanf(line, "wrap=%d", &a) == 1) g_set.wrap = a != 0;
         else if (sscanf(line, "case=%d", &a) == 1) g_set.caseFollow = a != 0;
+        else if (sscanf(line, "corona=%d", &a) == 1) g_set.corona = a != 0;
+        else if (sscanf(line, "cull=%d", &a) == 1) g_set.cull = a != 0;
+        else if (sscanf(line, "all=%d", &a) == 1) g_set.all = a != 0;
+        else if (sscanf(line, "los=%d", &a) == 1) g_set.los = a != 0 ? 1 : 0;
+        else if (sscanf(line, "bias=%f", &fv) == 1) { if (fv > -1.f && fv < 1.f) g_set.bias = fv; }
+        else if (sscanf(line, "scale=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.scale = fv; }
+        else if (sscanf(line, "gs%d=%f", &gi, &fv) == 2) { if (gi >= 1 && gi <= NGROUPS && fv > 0.f && fv < 5.f) g_set.gsize[gi - 1] = fv; }
+        else if (sscanf(line, "gc%d=%d,%d,%d", &gi, &a, &b, &c3) == 4)
+        {
+            if (gi >= 1 && gi <= NGROUPS)
+            {
+                g_set.gcol[gi - 1][0] = (uint8_t)a; g_set.gcol[gi - 1][1] = (uint8_t)b; g_set.gcol[gi - 1][2] = (uint8_t)c3;
+            }
+        }
         else if (sscanf(line, "test=%d", &a) == 1) g_set.test = (a >= 0 && a <= 5) ? a : 0;
         else if (sscanf(line, "g%d=%d,%d", &gi, &a, &b) == 3)
         {
@@ -601,6 +636,8 @@ static void ApplyColors(Cache* c)
     }
 }
 
+static void RegisterLamps(void* self, Cache* c);
+
 static int g_logCount = 0;
 
 static void OnVehiclePreRender(void* self)
@@ -632,6 +669,7 @@ static void OnVehiclePreRender(void* self)
 
     if (!g_litValid || g_litStamp != now) ComputeLit(now);
     ApplyColors(c);
+    RegisterLamps(self, c);
 }
 
 DECL_HOOKv(CVehicle_PreRender, void* self)
@@ -668,13 +706,111 @@ void VSL_Corona(unsigned int id, int xmm, int ymm, int zmm, int rmm,
     if (g_coronaCalls < 3) { ++g_coronaCalls; Log("VSL_Corona dipanggil: id=%x pos=%.2f,%.2f,%.2f r=%.3f tipe=%d", id, pos[0], pos[1], pos[2], rmm * 0.001f, type); }
 }
 
+// ---------- corona didaftarkan dari plugin, tepat sebelum mobil digambar (tanpa selisih frame) ----------
+static int g_camMm[3] = {0, 0, 0};
+static bool g_camValid = false;
+static uintptr_t g_ownPtr = 0;
+static bool g_corOk = true;
+static uint32_t g_regStamp = 0;
+static int g_corLog = 0;
+
+// matriks dunia kendaraan dari frame akar clump (RwMatrix: right, up(maju), at(atas), pos)
+static bool GetWorldMatrix(void* clump, float* m)
+{
+    void* root = nullptr;
+    if (!ReadPtr(clump, OFS_ATOM_PARENT, &root) || !root || ((uintptr_t)root & 3)) return false;
+    if (!SafeRead((char*)root + OFS_FRAME_MAT, m, 64)) return false;
+    for (int o = 0; o <= 8; o += 4)
+    {
+        float l = sqrtf(m[o] * m[o] + m[o + 1] * m[o + 1] + m[o + 2] * m[o + 2]);
+        if (!(l > 0.9f && l < 1.1f)) return false;
+    }
+    float d = m[0] * m[4] + m[1] * m[5] + m[2] * m[6];
+    if (!(fabsf(d) < 0.1f)) return false;
+    for (int k = 12; k < 15; ++k) if (!(fabsf(m[k]) < 20000.f)) return false;
+    return true;
+}
+
+static void RegisterLamps(void* self, Cache* c)
+{
+    if (!g_RegCorona || !g_corOk || !g_set.corona || !g_set.enabled) return;
+    if (!g_set.all && (uintptr_t)self != g_ownPtr) return;
+    float m[16];
+    if (!GetWorldMatrix(c->clump, m))
+    {
+        if (g_corLog < 5) { ++g_corLog; Log("matriks dunia kendaraan tidak valid, corona plugin dimatikan"); }
+        g_corOk = false;
+        return;
+    }
+    const bool useCull = g_set.cull && g_camValid;
+    const float cam[3] = { g_camMm[0] * 0.001f, g_camMm[1] * 0.001f, g_camMm[2] * 0.001f };
+    const unsigned slot = (unsigned)(c - g_cache) & 15u;
+    int registered = 0;
+    for (int g = 0; g < NGROUPS; ++g)
+    {
+        const Group& G = GROUPS[g];
+        const float nx = m[0] * G.nrm[0] + m[4] * G.nrm[1] + m[8] * G.nrm[2];
+        const float ny = m[1] * G.nrm[0] + m[5] * G.nrm[1] + m[9] * G.nrm[2];
+        const float nz = m[2] * G.nrm[0] + m[6] * G.nrm[1] + m[10] * G.nrm[2];
+        const float rad = g_set.gsize[g] * g_set.scale;
+        for (int i = 0; i < G.npts && i < MAXPTS; ++i)
+        {
+            const float x = G.pts[i][0], y = G.pts[i][1], z = G.pts[i][2];
+            float p[3] = { m[12] + m[0] * x + m[4] * y + m[8] * z,
+                           m[13] + m[1] * x + m[5] * y + m[9] * z,
+                           m[14] + m[2] * x + m[6] * y + m[10] * z };
+            bool show = true;
+            if (useCull)
+            {
+                float dx = cam[0] - p[0], dy = cam[1] - p[1], dz = cam[2] - p[2];
+                float d = sqrtf(dx * dx + dy * dy + dz * dz) + 1e-6f;
+                show = (nx * dx + ny * dy + nz * dz) / d > g_set.bias;
+            }
+            const unsigned id = 0x56000000u | (slot << 10) | (unsigned)(g * 20 + i);
+            if (g_lit[g][i] && show)
+            {
+                g_RegCorona(id, nullptr, g_set.gcol[g][0], g_set.gcol[g][1], g_set.gcol[g][2], 255, p, rad, 150.0f,
+                            (unsigned char)G.ctype, (unsigned char)G.flare, 0, (unsigned char)g_set.los, 0, 0.0f, false, 0.0f, false, 60.0f, false, false);
+                if (G.small)
+                    g_RegCorona(id + 0x200u, nullptr, 255, 255, 255, 255, p, rad * G.smallScale, 150.0f,
+                                (unsigned char)G.smallType, 0, 0, (unsigned char)g_set.los, 0, 0.0f, false, 0.0f, false, 60.0f, false, false);
+            }
+            else
+            {
+                // hitam = tidak terlihat, tapi tetap terdaftar dan ikut bergerak bersama mobil
+                g_RegCorona(id, nullptr, 0, 0, 0, 255, p, rad, 150.0f,
+                            (unsigned char)G.ctype, (unsigned char)G.flare, 0, 0, 0, 0.0f, false, 0.0f, false, 60.0f, false, false);
+            }
+            ++registered;
+        }
+    }
+    if (g_pTime) g_regStamp = *g_pTime;
+    if (g_corLog < 3 && registered > 0)
+    {
+        ++g_corLog;
+        Log("corona plugin: kendaraan=%p terdaftar=%d pos=%.1f,%.1f,%.1f kamera=%s", self, registered, m[12], m[13], m[14], useCull ? "ya" : "tidak");
+    }
+}
+
+// Dipanggil script Lua sekali per frame: posisi kamera (mm), penunjuk kendaraan aktif, bendera (bit0 = kamera valid).
+// Mengembalikan 1 kalau plugin yang menggambar corona (script tidak perlu menggambar sendiri).
+extern "C" __attribute__((visibility("default")))
+int VSL_Frame(int camx, int camy, int camz, unsigned int ownPtr, int flags)
+{
+    g_camMm[0] = camx; g_camMm[1] = camy; g_camMm[2] = camz;
+    g_camValid = (flags & 1) != 0;
+    g_ownPtr = ownPtr;
+    if (!g_RegCorona || !g_corOk || !g_set.corona || !g_set.enabled || !g_pTime) return 0;
+    return (*g_pTime - g_regStamp) < 250u ? 1 : 0;
+}
+
 static void PublishApi()
 {
     char p[400];
     snprintf(p, sizeof(p), "/storage/emulated/0/Android/data/%s/files/vsl_api.txt", g_pkg);
     FILE* f = fopen(p, "w");
     if (!f) { Log("tidak bisa menulis %s", p); return; }
-    fprintf(f, "%lu\n", (unsigned long)(uintptr_t)&VSL_Corona);
+    fprintf(f, "%lu\n%lu\n", (unsigned long)(uintptr_t)&VSL_Corona, (unsigned long)(uintptr_t)&VSL_Frame);
     fclose(f);
     Log("alamat VSL_Corona dipublikasikan ke %s (%p)", p, (void*)&VSL_Corona);
 }
