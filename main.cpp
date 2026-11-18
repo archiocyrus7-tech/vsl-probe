@@ -15,8 +15,9 @@
 #include <fcntl.h>
 #include <errno.h>
 #include "vsl_data.h"
+#include "vsl_shadow.h"
 
-MYMOD(vsl.huntley.led, VSL Huntley LED, 0.1, VSL port)
+MYMOD(vsl.huntley.led, VSL Huntley LED, 0.2, VSL port)
 
 // ---------- offset struktur (GTA SA 32-bit / RenderWare) ----------
 #ifdef HOST_TEST
@@ -99,6 +100,8 @@ struct Settings
     bool corona;
     bool cull;
     bool all;
+    bool shOn, shFlip;
+    float shInt, shScale, shAng, shVA;
     int los;
     float bias;
     float scale;
@@ -121,6 +124,8 @@ static void DefaultSettings()
     g_set.corona = true;
     g_set.cull = true;
     g_set.all = false;
+    g_set.shOn = true; g_set.shFlip = false;
+    g_set.shInt = 1.0f; g_set.shScale = 1.0f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
     g_set.los = 0;
     g_set.bias = -0.40f;
     g_set.scale = 1.0f;
@@ -151,6 +156,12 @@ static void ReadCfg()
         else if (sscanf(line, "los=%d", &a) == 1) g_set.los = a != 0 ? 1 : 0;
         else if (sscanf(line, "bias=%f", &fv) == 1) { if (fv > -1.f && fv < 1.f) g_set.bias = fv; }
         else if (sscanf(line, "scale=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.scale = fv; }
+        else if (sscanf(line, "shadow=%d", &a) == 1) g_set.shOn = a != 0;
+        else if (sscanf(line, "shflip=%d", &a) == 1) g_set.shFlip = a != 0;
+        else if (sscanf(line, "shint=%f", &fv) == 1) { if (fv >= 0.f && fv < 5.f) g_set.shInt = fv; }
+        else if (sscanf(line, "shscale=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.shScale = fv; }
+        else if (sscanf(line, "shang=%f", &fv) == 1) { if (fv > -360.f && fv < 360.f) g_set.shAng = fv; }
+        else if (sscanf(line, "shva=%f", &fv) == 1) { if (fv > 0.f && fv < 1000.f) g_set.shVA = fv; }
         else if (sscanf(line, "gs%d=%f", &gi, &fv) == 2) { if (gi >= 1 && gi <= NGROUPS && fv > 0.f && fv < 5.f) g_set.gsize[gi - 1] = fv; }
         else if (sscanf(line, "gc%d=%d,%d,%d", &gi, &a, &b, &c3) == 4)
         {
@@ -637,6 +648,7 @@ static void ApplyColors(Cache* c)
 }
 
 static void RegisterLamps(void* self, Cache* c);
+static void RegisterShadows(void* self, Cache* c);
 
 static int g_logCount = 0;
 
@@ -670,6 +682,7 @@ static void OnVehiclePreRender(void* self)
     if (!g_litValid || g_litStamp != now) ComputeLit(now);
     ApplyColors(c);
     RegisterLamps(self, c);
+    RegisterShadows(self, c);
 }
 
 DECL_HOOKv(CVehicle_PreRender, void* self)
@@ -792,6 +805,101 @@ static void RegisterLamps(void* self, Cache* c)
     }
 }
 
+// ---------- pendar di tanah (shadow additif bertekstur, seperti shadow VSL di PC) ----------
+// CShadows::StoreCarLightShadow(kendaraan, id, tekstur, posisi, frontX, frontY, sideX, sideY, r, g, b, maxViewAngle)
+typedef void (*StoreCarLightShadow_t)(void* veh, int id, void* tex, float* posn, float frontX, float frontY,
+                                      float sideX, float sideY, unsigned char r, unsigned char g, unsigned char b, float maxViewAngle);
+typedef void* (*RwRasterCreate_t)(int w, int h, int depth, int flags);
+typedef uint8_t* (*RwRasterLock_t)(void* raster, unsigned char level, int mode);
+typedef void* (*RwRasterUnlock_t)(void* raster);
+typedef void* (*RwTextureCreate_t)(void* raster);
+typedef void* (*RwTextureSetName_t)(void* tex, const char* name);
+static StoreCarLightShadow_t g_StoreShadow = nullptr;
+static RwRasterCreate_t g_RasterCreate = nullptr;
+static RwRasterLock_t g_RasterLock = nullptr;
+static RwRasterUnlock_t g_RasterUnlock = nullptr;
+static RwTextureCreate_t g_TextureCreate = nullptr;
+static RwTextureSetName_t g_TextureSetName = nullptr;
+static void* g_shTex[2] = { nullptr, nullptr };
+static int g_shState = 0;   // 0 = belum dicoba, 1 = siap, 2 = gagal (shadow mati, lampu & corona tetap jalan)
+static int g_shLog = 0;
+
+static void* MakeShadowTexture(const uint8_t* px, const char* name)
+{
+    void* r = g_RasterCreate(SH_TEX_SIZE, SH_TEX_SIZE, 32, 0x504);   // tipe tekstur + format 8888
+    if (!r) { Log("shadow: RwRasterCreate gagal (%s)", name); return nullptr; }
+    uint8_t* d = g_RasterLock(r, 0, 2);                              // 2 = tulis
+    char probe[16];
+    if (!d || !SafeRead(d, probe, sizeof(probe))) { Log("shadow: RwRasterLock gagal (%s) ptr=%p", name, (void*)d); return nullptr; }
+    for (int k = 0; k < SH_TEX_SIZE * SH_TEX_SIZE; ++k)
+    {
+        d[k * 4 + 0] = px[k]; d[k * 4 + 1] = px[k]; d[k * 4 + 2] = px[k]; d[k * 4 + 3] = px[k];
+    }
+    g_RasterUnlock(r);
+    void* t = g_TextureCreate(r);
+    if (!t) { Log("shadow: RwTextureCreate gagal (%s)", name); return nullptr; }
+    if (g_TextureSetName) g_TextureSetName(t, name);
+    Log("shadow: tekstur %s dibuat (%p)", name, t);
+    return t;
+}
+
+static bool EnsureShadowTex()
+{
+    if (g_shState == 1) return true;
+    if (g_shState == 2) return false;
+    g_shState = 2;
+    if (!g_StoreShadow || !g_RasterCreate || !g_RasterLock || !g_RasterUnlock || !g_TextureCreate)
+    {
+        Log("shadow: fungsi game tidak lengkap, shadow dimatikan");
+        return false;
+    }
+    g_shTex[0] = MakeShadowTexture(SH_TEX2, "vslsh2");
+    g_shTex[1] = MakeShadowTexture(SH_TEX3, "vslsh3");
+    if (!g_shTex[0] || !g_shTex[1]) return false;
+    g_shState = 1;
+    return true;
+}
+
+static void RegisterShadows(void* self, Cache* c)
+{
+    if (!g_set.shOn || !g_set.enabled || g_shState == 2) return;
+    if (!g_set.all && (uintptr_t)self != g_ownPtr) return;
+    if (!EnsureShadowTex()) return;
+    float m[16];
+    if (!GetWorldMatrix(c->clump, m)) return;
+    const unsigned slot = (unsigned)(c - g_cache) & 15u;
+    int stored = 0;
+    for (int k = 0; k < NSHADOWS; ++k)
+    {
+        const ShadowPt& S = SHADOWS[k];
+        if (!g_lit[S.g][S.i]) continue;
+        const Group& G = GROUPS[S.g];
+        const float lx = G.pts[S.i][0] + S.ox, ly = G.pts[S.i][1] + S.oy, lz = G.pts[S.i][2];
+        float p[3] = { m[12] + m[0] * lx + m[4] * ly + m[8] * lz,
+                       m[13] + m[1] * lx + m[5] * ly + m[9] * lz,
+                       m[14] + m[2] * lx + m[6] * ly + m[10] * lz };
+        const float a = (S.ang + g_set.shAng) * 0.0174532925f;
+        const float fl0 = -sinf(a), fl1 = cosf(a);      // arah "depan" shadow (lokal kendaraan)
+        const float sl0 = cosf(a), sl1 = sinf(a);       // arah "samping" shadow (lokal kendaraan)
+        const float fs = (g_set.shFlip ? -1.f : 1.f) * S.h * g_set.shScale;
+        const float ss = S.w * g_set.shScale;
+        const float fx = (m[0] * fl0 + m[4] * fl1) * fs, fy = (m[1] * fl0 + m[5] * fl1) * fs;
+        const float sx = (m[0] * sl0 + m[4] * sl1) * ss, sy = (m[1] * sl0 + m[5] * sl1) * ss;
+        float k2 = S.inten * g_set.shInt;
+        int r = (int)(g_set.gcol[S.g][0] * k2), gg = (int)(g_set.gcol[S.g][1] * k2), b = (int)(g_set.gcol[S.g][2] * k2);
+        if (r > 255) r = 255; if (gg > 255) gg = 255; if (b > 255) b = 255;
+        const int id = (int)(((uintptr_t)self & 0x0FFFFFFFu) + 0x100u * slot + (unsigned)k);
+        g_StoreShadow(self, id, g_shTex[S.tex == 2 ? 0 : 1], p, fx, fy, sx, sy,
+                      (unsigned char)r, (unsigned char)gg, (unsigned char)b, g_set.shVA);
+        ++stored;
+    }
+    if (g_shLog < 3 && stored > 0)
+    {
+        ++g_shLog;
+        Log("shadow: kendaraan=%p dikirim=%d (contoh: pos=%.1f,%.1f,%.1f)", self, stored, m[12], m[13], m[14]);
+    }
+}
+
 // Dipanggil script Lua sekali per frame: posisi kamera (mm), penunjuk kendaraan aktif, bendera (bit0 = kamera valid).
 // Mengembalikan 1 kalau plugin yang menggambar corona (script tidak perlu menggambar sendiri).
 extern "C" __attribute__((visibility("default")))
@@ -878,7 +986,7 @@ static void ScanExports(const char* path)
     }
     const Elf32_Shdr* sh = (const Elf32_Shdr*)shraw.data();
 
-    const char* keys[] = { "CShadows", "RwTexture", "RwTexDictionary", "CTxdStore", "RwStreamOpen", "RwStreamFindChunk", "RpAtomicGetBoundingSphere", "CRealTimeShadow" };
+    const char* keys[] = { "RwRaster", "StoreCarLightShadow" };
     const int nKeys = (int)(sizeof(keys) / sizeof(keys[0]));
 
     for (int s = 0; s < eh.e_shnum; ++s)
@@ -920,7 +1028,7 @@ static void ScanExports(const char* path)
 ON_MOD_LOAD()
 {
     InitPaths();
-    Log("== VSL Huntley LED 0.1 mulai (probe shadow) ==");
+    Log("== VSL Huntley LED 0.1 mulai (shadow) ==");
     DefaultSettings();
 
     void* h = aml->GetLibHandle("libGTASA.so");
@@ -939,6 +1047,14 @@ ON_MOD_LOAD()
     g_RegCorona = (RegisterCorona_t)aml->GetSym(h, "_ZN8CCoronas14RegisterCoronaEjP7CEntityhhhhRK7CVectorffhhhhhfbfbfbb");
     Log("CCoronas::RegisterCorona = %p", (void*)g_RegCorona);
     if (g_RegCorona) PublishApi();
+    g_StoreShadow = (StoreCarLightShadow_t)aml->GetSym(h, "_ZN8CShadows19StoreCarLightShadowEP8CVehicleiP9RwTextureP7CVectorffffhhhf");
+    g_RasterCreate = (RwRasterCreate_t)aml->GetSym(h, "_Z14RwRasterCreateiiii");
+    g_RasterLock = (RwRasterLock_t)aml->GetSym(h, "_Z12RwRasterLockP8RwRasterhi");
+    g_RasterUnlock = (RwRasterUnlock_t)aml->GetSym(h, "_Z14RwRasterUnlockP8RwRaster");
+    g_TextureCreate = (RwTextureCreate_t)aml->GetSym(h, "_Z15RwTextureCreateP8RwRaster");
+    g_TextureSetName = (RwTextureSetName_t)aml->GetSym(h, "_Z16RwTextureSetNameP9RwTexturePKc");
+    Log("shadow: StoreCarLightShadow=%p RasterCreate=%p Lock=%p Unlock=%p TextureCreate=%p SetName=%p",
+        (void*)g_StoreShadow, (void*)g_RasterCreate, (void*)g_RasterLock, (void*)g_RasterUnlock, (void*)g_TextureCreate, (void*)g_TextureSetName);
     char libPath[512];
     if (FindLibPath(libPath, sizeof(libPath))) ScanExports(libPath);
     else Log("path libGTASA tidak ketemu di /proc/self/maps");
