@@ -878,7 +878,7 @@ static void ScanExports(const char* path)
     }
     const Elf32_Shdr* sh = (const Elf32_Shdr*)shraw.data();
 
-    const char* keys[] = { "CCoronas", "RegisterCorona", "Corona" };
+    const char* keys[] = { "CShadows", "RwTexture", "RwTexDictionary", "CTxdStore", "RwStreamOpen", "RwStreamFindChunk", "RpAtomicGetBoundingSphere", "CRealTimeShadow" };
     const int nKeys = (int)(sizeof(keys) / sizeof(keys[0]));
 
     for (int s = 0; s < eh.e_shnum; ++s)
@@ -893,7 +893,7 @@ static void ScanExports(const char* path)
         size_t count = symraw.size() / sizeof(Elf32_Sym);
         Log("dynsym: %u simbol total", (unsigned)count);
         int shown = 0;
-        for (size_t i = 0; i < count && shown < 900; ++i)
+        for (size_t i = 0; i < count && shown < 700; ++i)
         {
             if (syms[i].st_shndx == SHN_UNDEF) continue;
             if (syms[i].st_name >= strraw.size()) continue;
@@ -920,7 +920,7 @@ static void ScanExports(const char* path)
 ON_MOD_LOAD()
 {
     InitPaths();
-    Log("== VSL Huntley LED 0.1 mulai ==");
+    Log("== VSL Huntley LED 0.1 mulai (probe shadow) ==");
     DefaultSettings();
 
     void* h = aml->GetLibHandle("libGTASA.so");
