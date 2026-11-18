@@ -102,6 +102,7 @@ struct Settings
     bool all;
     bool shOn, shFlip;
     float shInt, shScale, shAng, shVA;
+    int shMode, shType;
     int los;
     float bias;
     float scale;
@@ -126,6 +127,7 @@ static void DefaultSettings()
     g_set.all = false;
     g_set.shOn = true; g_set.shFlip = false;
     g_set.shInt = 1.0f; g_set.shScale = 1.0f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
+    g_set.shMode = 0; g_set.shType = 1;
     g_set.los = 0;
     g_set.bias = -0.40f;
     g_set.scale = 1.0f;
@@ -162,6 +164,8 @@ static void ReadCfg()
         else if (sscanf(line, "shscale=%f", &fv) == 1) { if (fv > 0.05f && fv < 10.f) g_set.shScale = fv; }
         else if (sscanf(line, "shang=%f", &fv) == 1) { if (fv > -360.f && fv < 360.f) g_set.shAng = fv; }
         else if (sscanf(line, "shva=%f", &fv) == 1) { if (fv > 0.f && fv < 1000.f) g_set.shVA = fv; }
+        else if (sscanf(line, "shmode=%d", &a) == 1) g_set.shMode = (a == 1) ? 1 : 0;
+        else if (sscanf(line, "shtype=%d", &a) == 1) g_set.shType = (a >= 0 && a <= 3) ? a : 1;
         else if (sscanf(line, "gs%d=%f", &gi, &fv) == 2) { if (gi >= 1 && gi <= NGROUPS && fv > 0.f && fv < 5.f) g_set.gsize[gi - 1] = fv; }
         else if (sscanf(line, "gc%d=%d,%d,%d", &gi, &a, &b, &c3) == 4)
         {
@@ -820,6 +824,12 @@ static RwRasterLock_t g_RasterLock = nullptr;
 static RwRasterUnlock_t g_RasterUnlock = nullptr;
 static RwTextureCreate_t g_TextureCreate = nullptr;
 static RwTextureSetName_t g_TextureSetName = nullptr;
+// CShadows::StoreStaticShadow(id, tipe, tekstur, posisi, frontX, frontY, sideX, sideY, intensitas, r, g, b, zDist, skala, jarakGambar, sementara, upDist)
+typedef void (*StoreStaticShadow_t)(unsigned int id, unsigned char type, void* tex, float* posn, float frontX, float frontY,
+                                    float sideX, float sideY, short intensity, unsigned char r, unsigned char g, unsigned char b,
+                                    float zDist, float scale, float drawDist, bool temp, float upDist);
+static StoreStaticShadow_t g_StoreStatic = nullptr;
+static int g_shRGB[3] = { 0, 0, 0 };
 static void* g_shTex[2] = { nullptr, nullptr };
 static int g_shState = 0;   // 0 = belum dicoba, 1 = siap, 2 = gagal (shadow mati, lampu & corona tetap jalan)
 static int g_shLog = 0;
@@ -872,7 +882,9 @@ static void RegisterShadows(void* self, Cache* c)
     for (int k = 0; k < NSHADOWS; ++k)
     {
         const ShadowPt& S = SHADOWS[k];
-        if (!g_lit[S.g][S.i]) continue;
+        const bool lit = g_lit[S.g][S.i] != 0;
+        const bool useStatic = (g_set.shMode == 1) && g_StoreStatic;
+        if (!lit && !useStatic) continue;
         const Group& G = GROUPS[S.g];
         const float lx = G.pts[S.i][0] + S.ox, ly = G.pts[S.i][1] + S.oy, lz = G.pts[S.i][2];
         float p[3] = { m[12] + m[0] * lx + m[4] * ly + m[8] * lz,
@@ -889,14 +901,26 @@ static void RegisterShadows(void* self, Cache* c)
         int r = (int)(g_set.gcol[S.g][0] * k2), gg = (int)(g_set.gcol[S.g][1] * k2), b = (int)(g_set.gcol[S.g][2] * k2);
         if (r > 255) r = 255; if (gg > 255) gg = 255; if (b > 255) b = 255;
         const int id = (int)(((uintptr_t)self & 0x0FFFFFFFu) + 0x100u * slot + (unsigned)k);
-        g_StoreShadow(self, id, g_shTex[S.tex == 2 ? 0 : 1], p, fx, fy, sx, sy,
-                      (unsigned char)r, (unsigned char)gg, (unsigned char)b, g_set.shVA);
-        ++stored;
+        if (useStatic)
+        {
+            int inten = lit ? (int)(255.f * k2) : 0;
+            if (inten > 255) inten = 255;
+            if (!lit) { r = gg = b = 0; }
+            g_StoreStatic((unsigned int)id, (unsigned char)g_set.shType, g_shTex[S.tex == 2 ? 0 : 1], p, fx, fy, sx, sy,
+                          (short)inten, (unsigned char)r, (unsigned char)gg, (unsigned char)b, 15.0f, 1.0f, 100.0f, true, 1.0f);
+        }
+        else
+        {
+            g_StoreShadow(self, id, g_shTex[S.tex == 2 ? 0 : 1], p, fx, fy, sx, sy,
+                          (unsigned char)r, (unsigned char)gg, (unsigned char)b, g_set.shVA);
+        }
+        g_shRGB[0] = r; g_shRGB[1] = gg; g_shRGB[2] = b;
+        if (lit) ++stored;
     }
     if (g_shLog < 3 && stored > 0)
     {
         ++g_shLog;
-        Log("shadow: kendaraan=%p dikirim=%d (contoh: pos=%.1f,%.1f,%.1f)", self, stored, m[12], m[13], m[14]);
+        Log("shadow: mode=%d tipe=%d kendaraan=%p dikirim=%d rgb=%d,%d,%d", g_set.shMode, g_set.shType, self, stored, g_shRGB[0], g_shRGB[1], g_shRGB[2]);
     }
 }
 
@@ -1053,6 +1077,8 @@ ON_MOD_LOAD()
     g_RasterUnlock = (RwRasterUnlock_t)aml->GetSym(h, "_Z14RwRasterUnlockP8RwRaster");
     g_TextureCreate = (RwTextureCreate_t)aml->GetSym(h, "_Z15RwTextureCreateP8RwRaster");
     g_TextureSetName = (RwTextureSetName_t)aml->GetSym(h, "_Z16RwTextureSetNameP9RwTexturePKc");
+    g_StoreStatic = (StoreStaticShadow_t)aml->GetSym(h, "_ZN8CShadows17StoreStaticShadowEjhP9RwTextureP7CVectorffffshhhfffbf");
+    Log("shadow: StoreStaticShadow=%p", (void*)g_StoreStatic);
     Log("shadow: StoreCarLightShadow=%p RasterCreate=%p Lock=%p Unlock=%p TextureCreate=%p SetName=%p",
         (void*)g_StoreShadow, (void*)g_RasterCreate, (void*)g_RasterLock, (void*)g_RasterUnlock, (void*)g_TextureCreate, (void*)g_TextureSetName);
     char libPath[512];
