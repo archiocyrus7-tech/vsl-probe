@@ -127,7 +127,7 @@ static void DefaultSettings()
     g_set.cull = true;
     g_set.all = false;
     g_set.shOn = true; g_set.shFlip = false;
-    g_set.shInt = 1.0f; g_set.shScale = 1.0f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
+    g_set.shInt = 1.0f; g_set.shScale = 0.5f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
     g_set.shTint = true;
     g_set.shMode = 0; g_set.shType = 1;
     g_set.los = 0;
@@ -167,7 +167,7 @@ static void ReadCfg()
         else if (sscanf(line, "shang=%f", &fv) == 1) { if (fv > -360.f && fv < 360.f) g_set.shAng = fv; }
         else if (sscanf(line, "shva=%f", &fv) == 1) { if (fv > 0.f && fv < 1000.f) g_set.shVA = fv; }
         else if (sscanf(line, "shtint=%d", &a) == 1) g_set.shTint = a != 0;
-        else if (sscanf(line, "shmode=%d", &a) == 1) g_set.shMode = (a == 1) ? 1 : 0;
+        else if (sscanf(line, "shmode=%d", &a) == 1) g_set.shMode = (a >= 0 && a <= 2) ? a : 0;
         else if (sscanf(line, "shtype=%d", &a) == 1) g_set.shType = (a >= 1 && a <= 3) ? a : 1;
         else if (sscanf(line, "gs%d=%f", &gi, &fv) == 2) { if (gi >= 1 && gi <= NGROUPS && fv > 0.f && fv < 5.f) g_set.gsize[gi - 1] = fv; }
         else if (sscanf(line, "gc%d=%d,%d,%d", &gi, &a, &b, &c3) == 4)
@@ -835,6 +835,8 @@ static StoreShadowEx_t g_StoreShadowEx = nullptr;
 static bool g_shExLogged = false;
 static int g_shRGB[3] = { 0, 0, 0 };
 static void* g_shTex[2] = { nullptr, nullptr };
+static void* g_shRaster[2] = { nullptr, nullptr };
+static void* g_lastRaster = nullptr;
 static int g_shState = 0;   // 0 = belum dicoba, 1 = siap, 2 = gagal (shadow mati, lampu & corona tetap jalan)
 static int g_shLog = 0;
 
@@ -843,6 +845,7 @@ static void* MakeShadowTexture(const uint8_t* px, const char* name)
     void* r = g_RasterCreate(SH_TEX_SIZE, SH_TEX_SIZE, 32, 0x504);   // tipe tekstur + format 8888
     if (!r) { Log("shadow: RwRasterCreate gagal (%s)", name); return nullptr; }
     uint8_t* d = g_RasterLock(r, 0, 2);                              // 2 = tulis
+    g_lastRaster = r;
     char probe[16];
     if (!d || !SafeRead(d, probe, sizeof(probe))) { Log("shadow: RwRasterLock gagal (%s) ptr=%p", name, (void*)d); return nullptr; }
     for (int k = 0; k < SH_TEX_SIZE * SH_TEX_SIZE; ++k)
@@ -868,7 +871,9 @@ static bool EnsureShadowTex()
         return false;
     }
     g_shTex[0] = MakeShadowTexture(SH_TEX2, "vslsh2");
+    g_shRaster[0] = g_lastRaster;
     g_shTex[1] = MakeShadowTexture(SH_TEX3, "vslsh3");
+    g_shRaster[1] = g_lastRaster;
     if (!g_shTex[0] || !g_shTex[1]) return false;
     g_shState = 1;
     return true;
@@ -915,11 +920,81 @@ static void* GetTintTexture(int ti, int r, int g, int b)
     return t;
 }
 
+// ---------- gambar sendiri: kerucut shadow VSL digambar langsung ke tanah (warna bebas) ----------
+typedef void* (*Im3DTransform_t)(void* verts, unsigned int n, void* ltm, unsigned int flags);
+typedef int (*Im3DRender_t)(int primType, unsigned short* idx, int n);
+typedef int (*Im3DEnd_t)(void);
+typedef int (*RwRSSet_t)(int state, void* val);
+typedef int (*RwRSGet_t)(int state, void* val);
+typedef float (*FindGroundZ_t)(float x, float y, float z, bool* found, void** ent);
+static Im3DTransform_t g_Im3DTransform = nullptr;
+static Im3DRender_t g_Im3DRender = nullptr;
+static Im3DEnd_t g_Im3DEnd = nullptr;
+static RwRSSet_t g_RSSet = nullptr;
+static RwRSGet_t g_RSGet = nullptr;
+static FindGroundZ_t g_FindGroundZ = nullptr;
+static bool g_imOk = false;
+
+struct Im3DVert { float x, y, z, nx, ny, nz; uint32_t col; float u, v; };
+struct GQuad { float p[4][3]; uint32_t col; int tex; };
+#define MAXQ 96
+static GQuad g_quad[MAXQ];
+static int g_nQuad = 0;
+static int g_imLog = 0;
+
+static void DrawVslGroundGlow()
+{
+    if (!g_imOk || g_nQuad <= 0) { g_nQuad = 0; return; }
+    const int RS_RASTER = 1, RS_ADDR = 2, RS_ZTEST = 6, RS_ZWRITE = 8, RS_FILTER = 9, RS_SRC = 10, RS_DST = 11, RS_VALPHA = 12, RS_FOG = 14;
+    intptr_t old[7] = { 1, 1, 5, 6, 1, 2, 0 };   // nilai bawaan kalau Get tidak ada: ztest, zwrite, src, dst, valpha, filter, fog
+    const int ids[7] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA, RS_FILTER, RS_FOG };
+    if (g_RSGet) for (int k = 0; k < 7; ++k) { void* v = nullptr; g_RSGet(ids[k], &v); old[k] = (intptr_t)v; }
+    g_RSSet(RS_ZTEST, (void*)1);
+    g_RSSet(RS_ZWRITE, (void*)0);
+    g_RSSet(RS_SRC, (void*)2);      // ONE
+    g_RSSet(RS_DST, (void*)2);      // ONE  -> cahaya ditambahkan ke tanah
+    g_RSSet(RS_VALPHA, (void*)1);
+    g_RSSet(RS_FILTER, (void*)2);   // linear
+    g_RSSet(RS_ADDR, (void*)3);     // clamp
+    g_RSSet(RS_FOG, (void*)0);
+    static unsigned short idx[6] = { 0, 1, 2, 0, 2, 3 };
+    static const float U[4] = { 0.f, 1.f, 1.f, 0.f }, V[4] = { 0.f, 0.f, 1.f, 1.f };
+    if (g_imLog < 2) { ++g_imLog; Log("shadow: gambar sendiri n=%d (kalau crash, baris ini terakhir)", g_nQuad); }
+    for (int q = 0; q < g_nQuad; ++q)
+    {
+        void* ras = g_shRaster[g_quad[q].tex];
+        if (!ras) continue;
+        g_RSSet(RS_RASTER, ras);
+        Im3DVert vs[4];
+        for (int k = 0; k < 4; ++k)
+        {
+            vs[k].x = g_quad[q].p[k][0]; vs[k].y = g_quad[q].p[k][1]; vs[k].z = g_quad[q].p[k][2];
+            vs[k].nx = 0.f; vs[k].ny = 0.f; vs[k].nz = 1.f;
+            vs[k].col = g_quad[q].col; vs[k].u = U[k]; vs[k].v = V[k];
+        }
+        if (g_Im3DTransform(vs, 4, nullptr, 1))   // 1 = rwIM3D_VERTEXUV
+        {
+            g_Im3DRender(3, idx, 6);               // 3 = daftar segitiga
+            g_Im3DEnd();
+        }
+    }
+    for (int k = 0; k < 7; ++k) g_RSSet(ids[k], (void*)old[k]);
+    g_nQuad = 0;
+}
+
+DECL_HOOKv(CShadows_RenderStored, bool b)
+{
+    CShadows_RenderStored(b);
+    DrawVslGroundGlow();
+}
+
 static void RegisterShadows(void* self, Cache* c)
 {
     if (!g_set.shOn || !g_set.enabled || g_shState == 2) return;
     if (!g_set.all && (uintptr_t)self != g_ownPtr) return;
     if (!EnsureShadowTex()) return;
+    int mode = g_set.shMode;
+    if (mode == 2 && !g_imOk) mode = 0;
     float m[16];
     if (!GetWorldMatrix(c->clump, m)) return;
     const unsigned slot = (unsigned)(c - g_cache) & 15u;
@@ -944,6 +1019,36 @@ static void RegisterShadows(void* self, Cache* c)
         int r = (int)(g_set.gcol[S.g][0] * k2), gg = (int)(g_set.gcol[S.g][1] * k2), b = (int)(g_set.gcol[S.g][2] * k2);
         if (r > 255) r = 255; if (gg > 255) gg = 255; if (b > 255) b = 255;
         const int id = (int)(((uintptr_t)self & 0x0FFFFFFFu) + 0x100u * slot + (unsigned)k);
+        if (mode == 2)
+        {
+            if (g_nQuad < MAXQ)
+            {
+                float gz = m[14] - 0.6f;
+                if (g_FindGroundZ)
+                {
+                    bool found = false; void* ent = nullptr;
+                    float z2 = g_FindGroundZ(p[0], p[1], p[2] + 1.0f, &found, &ent);
+                    if (found && z2 > -50.f && z2 < p[2] + 1.5f) gz = z2;
+                }
+                gz += 0.04f;
+                GQuad& Q = g_quad[g_nQuad++];
+                const float sgn[4][2] = { {-1.f, 1.f}, {1.f, 1.f}, {1.f, -1.f}, {-1.f, -1.f} };   // (samping, depan)
+                for (int k = 0; k < 4; ++k)
+                {
+                    Q.p[k][0] = p[0] + sgn[k][0] * sx + sgn[k][1] * fx;
+                    Q.p[k][1] = p[1] + sgn[k][0] * sy + sgn[k][1] * fy;
+                    Q.p[k][2] = gz;
+                }
+                int cr = (int)(g_set.gcol[S.g][0] * k2), cg = (int)(g_set.gcol[S.g][1] * k2), cb = (int)(g_set.gcol[S.g][2] * k2);
+                if (cr > 255) cr = 255; if (cg > 255) cg = 255; if (cb > 255) cb = 255;
+                if (cr < 0) cr = 0; if (cg < 0) cg = 0; if (cb < 0) cb = 0;
+                Q.col = 0xFF000000u | ((uint32_t)cb << 16) | ((uint32_t)cg << 8) | (uint32_t)cr;
+                Q.tex = (S.tex == 2) ? 0 : 1;
+                g_shRGB[0] = cr; g_shRGB[1] = cg; g_shRGB[2] = cb;
+                ++stored;
+            }
+            continue;
+        }
         void* tx = g_shTex[S.tex == 2 ? 0 : 1];
         int sr = r, sg = gg, sb = b;
         if (g_set.shTint)
@@ -958,7 +1063,7 @@ static void RegisterShadows(void* self, Cache* c)
                 sr = sg = sb = v;
             }
         }
-        if (g_set.shMode == 1 && g_StoreShadowEx)
+        if (mode == 1 && g_StoreShadowEx)
         {
             const bool tinted = (tx != g_shTex[S.tex == 2 ? 0 : 1]);
             int inten = (int)(255.f * k2);
@@ -985,7 +1090,7 @@ static void RegisterShadows(void* self, Cache* c)
     if (g_shLog < 3 && stored > 0)
     {
         ++g_shLog;
-        Log("shadow: mode=%d tipe=%d tint=%d kendaraan=%p dikirim=%d rgb=%d,%d,%d", g_set.shMode, g_set.shType, g_set.shTint ? 1 : 0, self, stored, g_shRGB[0], g_shRGB[1], g_shRGB[2]);
+        Log("shadow: mode=%d(aktif %d) tipe=%d tint=%d kendaraan=%p dikirim=%d rgb=%d,%d,%d", g_set.shMode, mode, g_set.shType, g_set.shTint ? 1 : 0, self, stored, g_shRGB[0], g_shRGB[1], g_shRGB[2]);
     }
 }
 
@@ -1045,6 +1150,12 @@ static bool ReadBlock(FILE* f, long fileSize, uint32_t off, uint32_t size, std::
 }
 
 // baca tabel simbol ekspor (.dynsym) dari file .so dan log nama yang relevan
+// nama simbol RenderWare/game yang dicari lewat pencocokan sebagian nama (supaya tidak bergantung tebakan nama mangled)
+static const char* NEED[] = { "RwIm3DTransform", "RwIm3DRenderIndexedPrimitive", "RwIm3DEnd", "RwRenderStateSet",
+                              "RwRenderStateGet", "CWorld21FindGroundZFor3DCoord", "CShadows19RenderStoredShadowsEb" };
+#define NNEED 7
+static char g_needName[NNEED][200];
+
 static void ScanExports(const char* path)
 {
     FILE* f = fopen(path, "rb");
@@ -1075,7 +1186,7 @@ static void ScanExports(const char* path)
     }
     const Elf32_Shdr* sh = (const Elf32_Shdr*)shraw.data();
 
-    const char* keys[] = { "RwRaster", "StoreCarLightShadow" };
+    const char* keys[] = { "RwIm3D", "RwRenderState" };
     const int nKeys = (int)(sizeof(keys) / sizeof(keys[0]));
 
     for (int s = 0; s < eh.e_shnum; ++s)
@@ -1098,6 +1209,14 @@ static void ScanExports(const char* path)
             // pastikan string berakhir di dalam buffer
             size_t maxLen = strraw.size() - syms[i].st_name;
             if (strnlen(name, maxLen) == maxLen) continue;
+            for (int n = 0; n < NNEED; ++n)
+            {
+                if (!g_needName[n][0] && name[0] == '_' && name[1] == 'Z' && strstr(name, NEED[n]) && strlen(name) < sizeof(g_needName[n]))
+                {
+                    strcpy(g_needName[n], name);
+                    Log("EXPORT dicari: %s", name);
+                }
+            }
             for (int k = 0; k < nKeys; ++k)
             {
                 if (strstr(name, keys[k]))
@@ -1149,4 +1268,23 @@ ON_MOD_LOAD()
     char libPath[512];
     if (FindLibPath(libPath, sizeof(libPath))) ScanExports(libPath);
     else Log("path libGTASA tidak ketemu di /proc/self/maps");
+
+    // simbol untuk mode "gambar sendiri" (dicari lewat nama hasil scan)
+    auto res = [&](int n) -> uintptr_t { return g_needName[n][0] ? aml->GetSym(h, g_needName[n]) : 0; };
+    g_Im3DTransform = (Im3DTransform_t)res(0);
+    g_Im3DRender = (Im3DRender_t)res(1);
+    g_Im3DEnd = (Im3DEnd_t)res(2);
+    g_RSSet = (RwRSSet_t)res(3);
+    g_RSGet = (RwRSGet_t)res(4);
+    g_FindGroundZ = (FindGroundZ_t)res(5);
+    uintptr_t rss = res(6);
+    Log("im3d: Transform=%p Render=%p End=%p RSSet=%p RSGet=%p GroundZ=%p RenderStoredShadows=0x%x",
+        (void*)g_Im3DTransform, (void*)g_Im3DRender, (void*)g_Im3DEnd, (void*)g_RSSet, (void*)g_RSGet, (void*)g_FindGroundZ, (unsigned)rss);
+    if (g_Im3DTransform && g_Im3DRender && g_Im3DEnd && g_RSSet && rss)
+    {
+        HOOKSYM(CShadows_RenderStored, h, g_needName[6]);
+        g_imOk = true;
+        Log("im3d: hook RenderStoredShadows terpasang, mode gambar sendiri siap");
+    }
+    else Log("im3d: simbol tidak lengkap, mode gambar sendiri dimatikan");
 }
