@@ -103,6 +103,7 @@ struct Settings
     bool shOn, shFlip;
     float shInt, shScale, shAng, shVA;
     bool shTint;
+    int shMode, shType;
     int los;
     float bias;
     float scale;
@@ -128,6 +129,7 @@ static void DefaultSettings()
     g_set.shOn = true; g_set.shFlip = false;
     g_set.shInt = 1.0f; g_set.shScale = 1.0f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
     g_set.shTint = true;
+    g_set.shMode = 0; g_set.shType = 1;
     g_set.los = 0;
     g_set.bias = -0.40f;
     g_set.scale = 1.0f;
@@ -165,6 +167,8 @@ static void ReadCfg()
         else if (sscanf(line, "shang=%f", &fv) == 1) { if (fv > -360.f && fv < 360.f) g_set.shAng = fv; }
         else if (sscanf(line, "shva=%f", &fv) == 1) { if (fv > 0.f && fv < 1000.f) g_set.shVA = fv; }
         else if (sscanf(line, "shtint=%d", &a) == 1) g_set.shTint = a != 0;
+        else if (sscanf(line, "shmode=%d", &a) == 1) g_set.shMode = (a == 1) ? 1 : 0;
+        else if (sscanf(line, "shtype=%d", &a) == 1) g_set.shType = (a >= 1 && a <= 3) ? a : 1;
         else if (sscanf(line, "gs%d=%f", &gi, &fv) == 2) { if (gi >= 1 && gi <= NGROUPS && fv > 0.f && fv < 5.f) g_set.gsize[gi - 1] = fv; }
         else if (sscanf(line, "gc%d=%d,%d,%d", &gi, &a, &b, &c3) == 4)
         {
@@ -823,6 +827,12 @@ static RwRasterLock_t g_RasterLock = nullptr;
 static RwRasterUnlock_t g_RasterUnlock = nullptr;
 static RwTextureCreate_t g_TextureCreate = nullptr;
 static RwTextureSetName_t g_TextureSetName = nullptr;
+// CShadows::StoreShadowToBeRendered(tipe, tekstur, posisi, frontX, frontY, sideX, sideY, intensitas, r, g, b, zDist, airJuga, skala, shadowRealtime, gambarDiBangunan)
+typedef void (*StoreShadowEx_t)(unsigned char type, void* tex, float* posn, float frontX, float frontY, float sideX, float sideY,
+                                short intensity, unsigned char r, unsigned char g, unsigned char b,
+                                float zDist, bool onWater, float scale, void* rts, bool onBuildings);
+static StoreShadowEx_t g_StoreShadowEx = nullptr;
+static bool g_shExLogged = false;
 static int g_shRGB[3] = { 0, 0, 0 };
 static void* g_shTex[2] = { nullptr, nullptr };
 static int g_shState = 0;   // 0 = belum dicoba, 1 = siap, 2 = gagal (shadow mati, lampu & corona tetap jalan)
@@ -948,14 +958,34 @@ static void RegisterShadows(void* self, Cache* c)
                 sr = sg = sb = v;
             }
         }
-        g_StoreShadow(self, id, tx, p, fx, fy, sx, sy, (unsigned char)sr, (unsigned char)sg, (unsigned char)sb, g_set.shVA);
+        if (g_set.shMode == 1 && g_StoreShadowEx)
+        {
+            const bool tinted = (tx != g_shTex[S.tex == 2 ? 0 : 1]);
+            int inten = (int)(255.f * k2);
+            if (inten > 255) inten = 255;
+            if (inten < 0) inten = 0;
+            int dr = tinted ? 255 : (int)g_set.gcol[S.g][0];
+            int dg = tinted ? 255 : (int)g_set.gcol[S.g][1];
+            int db = tinted ? 255 : (int)g_set.gcol[S.g][2];
+            if (dr < 0) dr = 0; if (dr > 255) dr = 255;
+            if (dg < 0) dg = 0; if (dg > 255) dg = 255;
+            if (db < 0) db = 0; if (db > 255) db = 255;
+            if (!g_shExLogged) { g_shExLogged = true; Log("shadow: memanggil StoreShadowToBeRendered tipe=%d (kalau crash, baris ini terakhir)", g_set.shType); }
+            g_StoreShadowEx((unsigned char)g_set.shType, tx, p, fx, fy, sx, sy, (short)inten,
+                            (unsigned char)dr, (unsigned char)dg, (unsigned char)db, 15.0f, false, 1.0f, nullptr, false);
+            sr = dr; sg = dg; sb = db;
+        }
+        else
+        {
+            g_StoreShadow(self, id, tx, p, fx, fy, sx, sy, (unsigned char)sr, (unsigned char)sg, (unsigned char)sb, g_set.shVA);
+        }
         g_shRGB[0] = sr; g_shRGB[1] = sg; g_shRGB[2] = sb;
         ++stored;
     }
     if (g_shLog < 3 && stored > 0)
     {
         ++g_shLog;
-        Log("shadow: tint=%d kendaraan=%p dikirim=%d rgb=%d,%d,%d", g_set.shTint ? 1 : 0, self, stored, g_shRGB[0], g_shRGB[1], g_shRGB[2]);
+        Log("shadow: mode=%d tipe=%d tint=%d kendaraan=%p dikirim=%d rgb=%d,%d,%d", g_set.shMode, g_set.shType, g_set.shTint ? 1 : 0, self, stored, g_shRGB[0], g_shRGB[1], g_shRGB[2]);
     }
 }
 
@@ -1112,6 +1142,8 @@ ON_MOD_LOAD()
     g_RasterUnlock = (RwRasterUnlock_t)aml->GetSym(h, "_Z14RwRasterUnlockP8RwRaster");
     g_TextureCreate = (RwTextureCreate_t)aml->GetSym(h, "_Z15RwTextureCreateP8RwRaster");
     g_TextureSetName = (RwTextureSetName_t)aml->GetSym(h, "_Z16RwTextureSetNameP9RwTexturePKc");
+    g_StoreShadowEx = (StoreShadowEx_t)aml->GetSym(h, "_ZN8CShadows23StoreShadowToBeRenderedEhP9RwTextureP7CVectorffffshhhfbfP15CRealTimeShadowb");
+    Log("shadow: StoreShadowToBeRendered(tekstur)=%p", (void*)g_StoreShadowEx);
     Log("shadow: StoreCarLightShadow=%p RasterCreate=%p Lock=%p Unlock=%p TextureCreate=%p SetName=%p",
         (void*)g_StoreShadow, (void*)g_RasterCreate, (void*)g_RasterLock, (void*)g_RasterUnlock, (void*)g_TextureCreate, (void*)g_TextureSetName);
     char libPath[512];
