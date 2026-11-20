@@ -954,7 +954,7 @@ static bool g_imMarked = false;
 static void DrawVslGroundGlow()
 {
     if (!g_imOk || g_nQuad <= 0) { g_nQuad = 0; return; }
-    const bool dbg = (g_imLog < 2);
+    const bool dbg = (g_imLog < 3);
     if (dbg) ++g_imLog;
     if (!g_imMarked)
     {
@@ -966,10 +966,24 @@ static void DrawVslGroundGlow()
         if (mf) { fputs("1", mf); fclose(mf); }
     }
     const int RS_RASTER = 1, RS_ZTEST = 6, RS_ZWRITE = 8, RS_SRC = 10, RS_DST = 11, RS_VALPHA = 12;
-    const int ids[5] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA };
-    intptr_t old[5] = { 1, 1, 5, 6, 1 };   // nilai bawaan kalau Get tidak ada
+    const int ids[6] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA, RS_RASTER };
+    const intptr_t defs[6] = { 1, 1, 5, 6, 0, 0 };   // nilai aman kalau Get tidak mengisi hasil
+    intptr_t old[6];
+    bool have[6];
     if (dbg) Log("im3d: 1 n=%d simpan state", g_nQuad);
-    if (g_RSGet) for (int k = 0; k < 5; ++k) { void* v = nullptr; g_RSGet(ids[k], &v); old[k] = (intptr_t)v; }
+    {
+        void* const SENT = (void*)0x7ffffff1;
+        for (int k = 0; k < 6; ++k)
+        {
+            void* v = SENT;
+            if (g_RSGet) g_RSGet(ids[k], &v);
+            have[k] = (v != SENT);
+            old[k] = (intptr_t)v;
+            if (have[k] && (k == 2 || k == 3) && (old[k] < 1 || old[k] > 11)) have[k] = false;   // blend tidak valid
+            if (have[k] && k <= 1 && (old[k] != 0 && old[k] != 1)) have[k] = false;
+            if (!have[k]) old[k] = defs[k];
+        }
+    }
     if (dbg) Log("im3d: 2 set state");
     g_RSSet(RS_ZTEST, (void*)1);
     g_RSSet(RS_ZWRITE, (void*)0);
@@ -1003,7 +1017,7 @@ static void DrawVslGroundGlow()
         }
     }
     if (dbg) Log("im3d: 8 kembalikan state");
-    for (int k = 0; k < 5; ++k) g_RSSet(ids[k], (void*)old[k]);
+    for (int k = 0; k < 6; ++k) g_RSSet(ids[k], (void*)old[k]);
     if (dbg) Log("im3d: 9 frame pertama aman");
     g_nQuad = 0;
     if (++g_imFrames == 120)
