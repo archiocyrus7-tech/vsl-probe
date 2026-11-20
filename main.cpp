@@ -942,28 +942,47 @@ static GQuad g_quad[MAXQ];
 static int g_nQuad = 0;
 static int g_imLog = 0;
 
+static void ImMarkerPath(char* out, size_t n)
+{
+    snprintf(out, n, "%s", g_cfgPath);
+    char* p = strstr(out, "vsl_cfg.txt");
+    if (p && (size_t)(p - out) + 20 < n) strcpy(p, "vsl_im3d_try.txt");
+}
+static int g_imFrames = 0;
+static bool g_imMarked = false;
+
 static void DrawVslGroundGlow()
 {
     if (!g_imOk || g_nQuad <= 0) { g_nQuad = 0; return; }
-    const int RS_RASTER = 1, RS_ADDR = 2, RS_ZTEST = 6, RS_ZWRITE = 8, RS_FILTER = 9, RS_SRC = 10, RS_DST = 11, RS_VALPHA = 12, RS_FOG = 14;
-    intptr_t old[7] = { 1, 1, 5, 6, 1, 2, 0 };   // nilai bawaan kalau Get tidak ada: ztest, zwrite, src, dst, valpha, filter, fog
-    const int ids[7] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA, RS_FILTER, RS_FOG };
-    if (g_RSGet) for (int k = 0; k < 7; ++k) { void* v = nullptr; g_RSGet(ids[k], &v); old[k] = (intptr_t)v; }
+    const bool dbg = (g_imLog < 2);
+    if (dbg) ++g_imLog;
+    if (!g_imMarked)
+    {
+        // penanda: kalau game crash saat menggambar, sesi berikutnya mode ini otomatis dimatikan
+        g_imMarked = true;
+        char mp[420];
+        ImMarkerPath(mp, sizeof(mp));
+        FILE* mf = fopen(mp, "w");
+        if (mf) { fputs("1", mf); fclose(mf); }
+    }
+    const int RS_RASTER = 1, RS_ZTEST = 6, RS_ZWRITE = 8, RS_SRC = 10, RS_DST = 11, RS_VALPHA = 12;
+    const int ids[5] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA };
+    intptr_t old[5] = { 1, 1, 5, 6, 1 };   // nilai bawaan kalau Get tidak ada
+    if (dbg) Log("im3d: 1 n=%d simpan state", g_nQuad);
+    if (g_RSGet) for (int k = 0; k < 5; ++k) { void* v = nullptr; g_RSGet(ids[k], &v); old[k] = (intptr_t)v; }
+    if (dbg) Log("im3d: 2 set state");
     g_RSSet(RS_ZTEST, (void*)1);
     g_RSSet(RS_ZWRITE, (void*)0);
     g_RSSet(RS_SRC, (void*)2);      // ONE
     g_RSSet(RS_DST, (void*)2);      // ONE  -> cahaya ditambahkan ke tanah
     g_RSSet(RS_VALPHA, (void*)1);
-    g_RSSet(RS_FILTER, (void*)2);   // linear
-    g_RSSet(RS_ADDR, (void*)3);     // clamp
-    g_RSSet(RS_FOG, (void*)0);
     static unsigned short idx[6] = { 0, 1, 2, 0, 2, 3 };
     static const float U[4] = { 0.f, 1.f, 1.f, 0.f }, V[4] = { 0.f, 0.f, 1.f, 1.f };
-    if (g_imLog < 2) { ++g_imLog; Log("shadow: gambar sendiri n=%d (kalau crash, baris ini terakhir)", g_nQuad); }
     for (int q = 0; q < g_nQuad; ++q)
     {
         void* ras = g_shRaster[g_quad[q].tex];
         if (!ras) continue;
+        if (dbg && q == 0) Log("im3d: 3 raster=%p", ras);
         g_RSSet(RS_RASTER, ras);
         Im3DVert vs[4];
         for (int k = 0; k < 4; ++k)
@@ -972,14 +991,27 @@ static void DrawVslGroundGlow()
             vs[k].nx = 0.f; vs[k].ny = 0.f; vs[k].nz = 1.f;
             vs[k].col = g_quad[q].col; vs[k].u = U[k]; vs[k].v = V[k];
         }
-        if (g_Im3DTransform(vs, 4, nullptr, 1))   // 1 = rwIM3D_VERTEXUV
+        if (dbg && q == 0) Log("im3d: 4 Transform pos=%.1f,%.1f,%.1f", vs[0].x, vs[0].y, vs[0].z);
+        void* tr = g_Im3DTransform(vs, 4, nullptr, 1);   // 1 = rwIM3D_VERTEXUV
+        if (dbg && q == 0) Log("im3d: 5 Transform hasil=%p", tr);
+        if (tr)
         {
             g_Im3DRender(3, idx, 6);               // 3 = daftar segitiga
+            if (dbg && q == 0) Log("im3d: 6 Render selesai");
             g_Im3DEnd();
+            if (dbg && q == 0) Log("im3d: 7 End selesai");
         }
     }
-    for (int k = 0; k < 7; ++k) g_RSSet(ids[k], (void*)old[k]);
+    if (dbg) Log("im3d: 8 kembalikan state");
+    for (int k = 0; k < 5; ++k) g_RSSet(ids[k], (void*)old[k]);
+    if (dbg) Log("im3d: 9 frame pertama aman");
     g_nQuad = 0;
+    if (++g_imFrames == 120)
+    {
+        char mp[420];
+        ImMarkerPath(mp, sizeof(mp));
+        remove(mp);   // 120 frame aman: penanda dihapus
+    }
 }
 
 DECL_HOOKv(CShadows_RenderStored, bool b)
@@ -1280,7 +1312,13 @@ ON_MOD_LOAD()
     uintptr_t rss = res(6);
     Log("im3d: Transform=%p Render=%p End=%p RSSet=%p RSGet=%p GroundZ=%p RenderStoredShadows=0x%x",
         (void*)g_Im3DTransform, (void*)g_Im3DRender, (void*)g_Im3DEnd, (void*)g_RSSet, (void*)g_RSGet, (void*)g_FindGroundZ, (unsigned)rss);
-    if (g_Im3DTransform && g_Im3DRender && g_Im3DEnd && g_RSSet && rss)
+    char imMark[420];
+    ImMarkerPath(imMark, sizeof(imMark));
+    FILE* imf = fopen(imMark, "r");
+    const bool imCrashed = (imf != nullptr);
+    if (imf) fclose(imf);
+    if (imCrashed) Log("im3d: sesi sebelumnya crash saat menggambar, mode gambar sendiri dimatikan (hapus file vsl_im3d_try.txt untuk mencoba lagi)");
+    if (!imCrashed && g_Im3DTransform && g_Im3DRender && g_Im3DEnd && g_RSSet && rss)
     {
         HOOKSYM(CShadows_RenderStored, h, g_needName[6]);
         g_imOk = true;
