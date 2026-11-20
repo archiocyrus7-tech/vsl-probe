@@ -104,6 +104,9 @@ struct Settings
     float shInt, shScale, shAng, shVA;
     bool shTint;
     int shMode, shType;
+    int imFlags;
+    bool imNoTex;
+    float imZoff;
     int los;
     float bias;
     float scale;
@@ -130,6 +133,7 @@ static void DefaultSettings()
     g_set.shInt = 1.0f; g_set.shScale = 0.5f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
     g_set.shTint = true;
     g_set.shMode = 0; g_set.shType = 1;
+    g_set.imFlags = 1; g_set.imNoTex = false; g_set.imZoff = 0.08f;
     g_set.los = 0;
     g_set.bias = -0.40f;
     g_set.scale = 1.0f;
@@ -169,6 +173,9 @@ static void ReadCfg()
         else if (sscanf(line, "shtint=%d", &a) == 1) g_set.shTint = a != 0;
         else if (sscanf(line, "shmode=%d", &a) == 1) g_set.shMode = (a >= 0 && a <= 2) ? a : 0;
         else if (sscanf(line, "shtype=%d", &a) == 1) g_set.shType = (a >= 1 && a <= 3) ? a : 1;
+        else if (sscanf(line, "imflags=%d", &a) == 1) g_set.imFlags = (a >= 0 && a <= 31) ? a : 1;
+        else if (sscanf(line, "imnotex=%d", &a) == 1) g_set.imNoTex = a != 0;
+        else if (sscanf(line, "imzoff=%f", &fv) == 1) { if (fv >= -0.5f && fv < 1.0f) g_set.imZoff = fv; }
         else if (sscanf(line, "gs%d=%f", &gi, &fv) == 2) { if (gi >= 1 && gi <= NGROUPS && fv > 0.f && fv < 5.f) g_set.gsize[gi - 1] = fv; }
         else if (sscanf(line, "gc%d=%d,%d,%d", &gi, &a, &b, &c3) == 4)
         {
@@ -999,7 +1006,7 @@ static void DrawVslGroundGlow()
         void* ras = g_shRaster[g_quad[q].tex];
         if (!ras) continue;
         if (dbg && q == 0) Log("im3d: 3 raster=%p", ras);
-        g_RSSet(RS_RASTER, ras);
+        g_RSSet(RS_RASTER, g_set.imNoTex ? nullptr : ras);
         Im3DVert vs[4];
         for (int k = 0; k < 4; ++k)
         {
@@ -1008,7 +1015,7 @@ static void DrawVslGroundGlow()
             vs[k].col = g_quad[q].col; vs[k].u = U[k]; vs[k].v = V[k];
         }
         if (dbg && q == 0) Log("im3d: 4 Transform pos=%.1f,%.1f,%.1f", vs[0].x, vs[0].y, vs[0].z);
-        void* tr = g_Im3DTransform(vs, 4, nullptr, 1);   // 1 = rwIM3D_VERTEXUV
+        void* tr = g_Im3DTransform(vs, 4, nullptr, (unsigned int)g_set.imFlags);   // bawaan 1 = rwIM3D_VERTEXUV
         if (dbg && q == 0) Log("im3d: 5 Transform hasil=%p", tr);
         if (tr)
         {
@@ -1082,7 +1089,7 @@ static void RegisterShadows(void* self, Cache* c)
                     static int gl = 0;
                     if (gl < 3) { ++gl; Log("im3d: tinggi tanah=%.2f z-lampu=%.2f z-mobil=%.2f (fungsi tanah %s)", gz, p[2], m[14], g_FindGroundZ ? "ada" : "tidak ada"); }
                 }
-                gz += 0.08f;
+                gz += g_set.imZoff;
                 GQuad& Q = g_quad[g_nQuad++];
                 const float sgn[4][2] = { {-1.f, 1.f}, {1.f, 1.f}, {1.f, -1.f}, {-1.f, -1.f} };   // (samping, depan)
                 for (int k = 0; k < 4; ++k)
