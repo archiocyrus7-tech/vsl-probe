@@ -965,15 +965,15 @@ static void DrawVslGroundGlow()
         FILE* mf = fopen(mp, "w");
         if (mf) { fputs("1", mf); fclose(mf); }
     }
-    const int RS_RASTER = 1, RS_ZTEST = 6, RS_ZWRITE = 8, RS_SRC = 10, RS_DST = 11, RS_VALPHA = 12;
-    const int ids[6] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA, RS_RASTER };
-    const intptr_t defs[6] = { 1, 1, 5, 6, 0, 0 };   // nilai aman kalau Get tidak mengisi hasil
-    intptr_t old[6];
-    bool have[6];
+    const int RS_RASTER = 1, RS_ZTEST = 6, RS_ZWRITE = 8, RS_SRC = 10, RS_DST = 11, RS_VALPHA = 12, RS_CULL = 20;
+    const int ids[7] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA, RS_RASTER, RS_CULL };
+    const intptr_t defs[7] = { 1, 1, 5, 6, 0, 0, 2 };   // nilai aman kalau Get tidak mengisi hasil
+    intptr_t old[7];
+    bool have[7];
     if (dbg) Log("im3d: 1 n=%d simpan state", g_nQuad);
     {
         void* const SENT = (void*)0x7ffffff1;
-        for (int k = 0; k < 6; ++k)
+        for (int k = 0; k < 7; ++k)
         {
             void* v = SENT;
             if (g_RSGet) g_RSGet(ids[k], &v);
@@ -981,6 +981,7 @@ static void DrawVslGroundGlow()
             old[k] = (intptr_t)v;
             if (have[k] && (k == 2 || k == 3) && (old[k] < 1 || old[k] > 11)) have[k] = false;   // blend tidak valid
             if (have[k] && k <= 1 && (old[k] != 0 && old[k] != 1)) have[k] = false;
+            if (have[k] && k == 6 && (old[k] < 1 || old[k] > 3)) have[k] = false;   // mode cull tidak valid
             if (!have[k]) old[k] = defs[k];
         }
     }
@@ -990,6 +991,7 @@ static void DrawVslGroundGlow()
     g_RSSet(RS_SRC, (void*)2);      // ONE
     g_RSSet(RS_DST, (void*)2);      // ONE  -> cahaya ditambahkan ke tanah
     g_RSSet(RS_VALPHA, (void*)1);
+    g_RSSet(RS_CULL, (void*)1);     // tanpa cull: kotak terlihat dari atas apa pun arah belitannya
     static unsigned short idx[6] = { 0, 1, 2, 0, 2, 3 };
     static const float U[4] = { 0.f, 1.f, 1.f, 0.f }, V[4] = { 0.f, 0.f, 1.f, 1.f };
     for (int q = 0; q < g_nQuad; ++q)
@@ -1017,7 +1019,7 @@ static void DrawVslGroundGlow()
         }
     }
     if (dbg) Log("im3d: 8 kembalikan state");
-    for (int k = 0; k < 6; ++k) g_RSSet(ids[k], (void*)old[k]);
+    for (int k = 0; k < 7; ++k) g_RSSet(ids[k], (void*)old[k]);
     if (dbg) Log("im3d: 9 frame pertama aman");
     g_nQuad = 0;
     if (++g_imFrames == 120)
@@ -1076,7 +1078,11 @@ static void RegisterShadows(void* self, Cache* c)
                     float z2 = g_FindGroundZ(p[0], p[1], p[2] + 1.0f, &found, &ent);
                     if (found && z2 > -50.f && z2 < p[2] + 1.5f) gz = z2;
                 }
-                gz += 0.04f;
+                {
+                    static int gl = 0;
+                    if (gl < 3) { ++gl; Log("im3d: tinggi tanah=%.2f z-lampu=%.2f z-mobil=%.2f (fungsi tanah %s)", gz, p[2], m[14], g_FindGroundZ ? "ada" : "tidak ada"); }
+                }
+                gz += 0.08f;
                 GQuad& Q = g_quad[g_nQuad++];
                 const float sgn[4][2] = { {-1.f, 1.f}, {1.f, 1.f}, {1.f, -1.f}, {-1.f, -1.f} };   // (samping, depan)
                 for (int k = 0; k < 4; ++k)
