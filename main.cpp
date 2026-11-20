@@ -133,7 +133,7 @@ static void DefaultSettings()
     g_set.shInt = 1.0f; g_set.shScale = 0.5f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
     g_set.shTint = true;
     g_set.shMode = 0; g_set.shType = 1;
-    g_set.imFlags = 1; g_set.imNoTex = false; g_set.imZoff = 0.08f;
+    g_set.imFlags = 1; g_set.imNoTex = false; g_set.imZoff = 0.05f;
     g_set.los = 0;
     g_set.bias = -0.40f;
     g_set.scale = 1.0f;
@@ -972,15 +972,15 @@ static void DrawVslGroundGlow()
         FILE* mf = fopen(mp, "w");
         if (mf) { fputs("1", mf); fclose(mf); }
     }
-    const int RS_RASTER = 1, RS_ZTEST = 6, RS_ZWRITE = 8, RS_SRC = 10, RS_DST = 11, RS_VALPHA = 12, RS_CULL = 20;
-    const int ids[7] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA, RS_RASTER, RS_CULL };
-    const intptr_t defs[7] = { 1, 1, 5, 6, 0, 0, 2 };   // nilai aman kalau Get tidak mengisi hasil
-    intptr_t old[7];
-    bool have[7];
+    const int RS_RASTER = 1, RS_ZTEST = 6, RS_ZWRITE = 8, RS_SRC = 10, RS_DST = 11, RS_VALPHA = 12, RS_CULL = 20, RS_FILTER = 9;
+    const int ids[8] = { RS_ZTEST, RS_ZWRITE, RS_SRC, RS_DST, RS_VALPHA, RS_RASTER, RS_CULL, RS_FILTER };
+    const intptr_t defs[8] = { 1, 1, 5, 6, 0, 0, 2, 2 };   // nilai aman kalau Get tidak mengisi hasil
+    intptr_t old[8];
+    bool have[8];
     if (dbg) Log("im3d: 1 n=%d simpan state", g_nQuad);
     {
         void* const SENT = (void*)0x7ffffff1;
-        for (int k = 0; k < 7; ++k)
+        for (int k = 0; k < 8; ++k)
         {
             void* v = SENT;
             if (g_RSGet) g_RSGet(ids[k], &v);
@@ -989,6 +989,7 @@ static void DrawVslGroundGlow()
             if (have[k] && (k == 2 || k == 3) && (old[k] < 1 || old[k] > 11)) have[k] = false;   // blend tidak valid
             if (have[k] && k <= 1 && (old[k] != 0 && old[k] != 1)) have[k] = false;
             if (have[k] && k == 6 && (old[k] < 1 || old[k] > 3)) have[k] = false;   // mode cull tidak valid
+            if (have[k] && k == 7 && (old[k] < 0 || old[k] > 6)) have[k] = false;   // filter tidak valid
             if (!have[k]) old[k] = defs[k];
         }
     }
@@ -998,6 +999,7 @@ static void DrawVslGroundGlow()
     g_RSSet(RS_SRC, (void*)2);      // ONE
     g_RSSet(RS_DST, (void*)2);      // ONE  -> cahaya ditambahkan ke tanah
     g_RSSet(RS_VALPHA, (void*)1);
+    g_RSSet(RS_FILTER, (void*)2);   // linear tanpa mipmap (kalau tidak, tekstur tanpa mip dibaca hitam)
     g_RSSet(RS_CULL, (void*)1);     // tanpa cull: kotak terlihat dari atas apa pun arah belitannya
     static unsigned short idx[6] = { 0, 1, 2, 0, 2, 3 };
     static const float U[4] = { 0.f, 1.f, 1.f, 0.f }, V[4] = { 0.f, 0.f, 1.f, 1.f };
@@ -1026,7 +1028,7 @@ static void DrawVslGroundGlow()
         }
     }
     if (dbg) Log("im3d: 8 kembalikan state");
-    for (int k = 0; k < 7; ++k) g_RSSet(ids[k], (void*)old[k]);
+    for (int k = 0; k < 8; ++k) g_RSSet(ids[k], (void*)old[k]);
     if (dbg) Log("im3d: 9 frame pertama aman");
     g_nQuad = 0;
     if (++g_imFrames == 120)
