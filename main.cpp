@@ -16,6 +16,7 @@
 #include <errno.h>
 #include "vsl_data.h"
 #include "vsl_shadow.h"
+#include "vsl_diag.h"
 
 MYMOD(vsl.huntley.led, VSL Huntley LED, 1.0, VSL port)
 
@@ -663,6 +664,7 @@ static void ApplyColors(Cache* c)
 
 static void RegisterLamps(void* self, Cache* c);
 static void RegisterShadows(void* self, Cache* c);
+static void DiagVehicle(void* self, void* clump);
 
 static int g_logCount = 0;
 
@@ -679,6 +681,8 @@ static void OnVehiclePreRender(void* self)
     void* clump = *(void**)((char*)self + OFS_ENT_CLUMP);
     if (!clump || ((uintptr_t)clump & 3)) return;
     if (((uint8_t*)clump)[0] != 2) return;                 // bukan rpCLUMP
+
+    DiagVehicle(self, clump);
 
     void* probe = GetFrameFromName(clump, "lightbar-led-1");
     if (!probe) return;                                    // bukan Huntley ber-lightbar
@@ -1188,6 +1192,41 @@ static void RegisterShadows(void* self, Cache* c)
         ++g_shLog;
         Log("shadow: mode=%d(aktif %d) tipe=%d tint=%d kendaraan=%p dikirim=%d rgb=%d,%d,%d", g_set.shMode, mode, g_set.shType, g_set.shTint ? 1 : 0, self, stored, g_shRGB[0], g_shRGB[1], g_shRGB[2]);
     }
+}
+
+// ---------- diagnostik: bingkai (frame) lampu apa saja yang dimiliki tiap kendaraan di game ini ----------
+static void* g_diagSeen[64];
+static int g_nDiagSeen = 0;
+
+static void DiagVehicle(void* self, void* clump)
+{
+    for (int i = 0; i < g_nDiagSeen; ++i) if (g_diagSeen[i] == self) return;
+    if (g_nDiagSeen >= 64) return;
+    g_diagSeen[g_nDiagSeen++] = self;
+    int hits = 0;
+    char line[600];
+    line[0] = 0;
+    for (int d = 0; d < NDIAG; ++d)
+    {
+        int found = 0;
+        for (int i = 1; i <= DIAG[d].n; ++i)
+        {
+            char nm[96];
+            snprintf(nm, sizeof(nm), "%s%d", DIAG[d].prefix, i);
+            if (GetFrameFromName(clump, nm)) ++found;
+        }
+        if (found > 0)
+        {
+            ++hits;
+            Log("diag kendaraan=%p cocok: veh=%d grup=%d '%s' prefix=%s ditemukan=%d/%d", self, DIAG[d].veh, DIAG[d].idx, DIAG[d].name, DIAG[d].prefix, found, DIAG[d].n);
+        }
+    }
+    // kandidat letak nomor model di objek kendaraan (nilai 16-bit di 0x20..0x30)
+    unsigned short w[9];
+    bool ok = SafeRead((char*)self + 0x20, w, sizeof(w));
+    if (ok) Log("diag kendaraan=%p cocok=%d u16@0x20..0x30: %u %u %u %u %u %u %u %u %u", self, hits, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8]);
+    else Log("diag kendaraan=%p cocok=%d (nomor model tidak terbaca)", self, hits);
+    (void)line;
 }
 
 // Dipanggil script Lua sekali per frame: posisi kamera (mm), penunjuk kendaraan aktif, bendera (bit0 = kamera valid).
