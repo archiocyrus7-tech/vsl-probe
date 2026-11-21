@@ -17,7 +17,7 @@
 #include "vsl_data.h"
 #include "vsl_shadow.h"
 
-MYMOD(vsl.huntley.led, VSL Huntley LED, 0.2, VSL port)
+MYMOD(vsl.huntley.led, VSL Huntley LED, 1.0, VSL port)
 
 // ---------- offset struktur (GTA SA 32-bit / RenderWare) ----------
 #ifdef HOST_TEST
@@ -130,9 +130,9 @@ static void DefaultSettings()
     g_set.cull = true;
     g_set.all = false;
     g_set.shOn = true; g_set.shFlip = false;
-    g_set.shInt = 1.0f; g_set.shScale = 0.5f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
+    g_set.shInt = 1.0f; g_set.shScale = 1.0f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
     g_set.shTint = true;
-    g_set.shMode = 0; g_set.shType = 1;
+    g_set.shMode = 2; g_set.shType = 1;
     g_set.imFlags = 1; g_set.imNoTex = false; g_set.imZoff = 0.05f;
     g_set.los = 0;
     g_set.bias = -0.40f;
