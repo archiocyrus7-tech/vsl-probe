@@ -1003,25 +1003,60 @@ static void DrawVslGroundGlow()
     g_RSSet(RS_CULL, (void*)1);     // tanpa cull: kotak terlihat dari atas apa pun arah belitannya
     static unsigned short idx[6] = { 0, 1, 2, 0, 2, 3 };
     static const float U[4] = { 0.f, 1.f, 1.f, 0.f }, V[4] = { 0.f, 0.f, 1.f, 1.f };
+    // kerucut digambar tanpa tekstur: kotak dipecah jadi kisi, tiap titik diberi warna = warna grup x kecerahan tekstur VSL
+    // (cara ini tidak bergantung pada pembacaan tekstur oleh game; kotak polos sudah terbukti tampil benar)
+    g_RSSet(RS_RASTER, nullptr);
+    const int N = 12;
+    static unsigned short gidx[12 * 12 * 6];
+    static bool gbuilt = false;
+    if (!gbuilt)
+    {
+        gbuilt = true;
+        int t = 0;
+        for (int j2 = 0; j2 < N; ++j2)
+            for (int i2 = 0; i2 < N; ++i2)
+            {
+                const unsigned short a = (unsigned short)(j2 * (N + 1) + i2), b = (unsigned short)(a + 1);
+                const unsigned short c2 = (unsigned short)(a + (N + 1)), d2 = (unsigned short)(c2 + 1);
+                gidx[t++] = a; gidx[t++] = b; gidx[t++] = d2;
+                gidx[t++] = a; gidx[t++] = d2; gidx[t++] = c2;
+            }
+    }
+    if (dbg) Log("im3d: 3 kisi %dx%d tanpa tekstur", N, N);
     for (int q = 0; q < g_nQuad; ++q)
     {
-        void* ras = g_shRaster[g_quad[q].tex];
-        if (!ras) continue;
-        if (dbg && q == 0) Log("im3d: 3 raster=%p", ras);
-        g_RSSet(RS_RASTER, g_set.imNoTex ? nullptr : ras);
-        Im3DVert vs[4];
-        for (int k = 0; k < 4; ++k)
-        {
-            vs[k].x = g_quad[q].p[k][0]; vs[k].y = g_quad[q].p[k][1]; vs[k].z = g_quad[q].p[k][2];
-            vs[k].nx = 0.f; vs[k].ny = 0.f; vs[k].nz = 1.f;
-            vs[k].col = g_quad[q].col; vs[k].u = U[k]; vs[k].v = V[k];
-        }
-        if (dbg && q == 0) Log("im3d: 4 Transform pos=%.1f,%.1f,%.1f", vs[0].x, vs[0].y, vs[0].z);
-        void* tr = g_Im3DTransform(vs, 4, nullptr, (unsigned int)g_set.imFlags);   // bawaan 1 = rwIM3D_VERTEXUV
+        const GQuad& Q = g_quad[q];
+        const uint8_t* tx = (Q.tex == 0) ? SH_TEX2 : SH_TEX3;
+        const float baseR = (float)(Q.col & 0xFF), baseG = (float)((Q.col >> 8) & 0xFF), baseB = (float)((Q.col >> 16) & 0xFF);
+        Im3DVert vs[(12 + 1) * (12 + 1)];
+        for (int j2 = 0; j2 <= N; ++j2)
+            for (int i2 = 0; i2 <= N; ++i2)
+            {
+                const float u = (float)i2 / N, v = (float)j2 / N;
+                float gray = 1.f;
+                if (!g_set.imNoTex)
+                {
+                    const float fx2 = u * (SH_TEX_SIZE - 1), fy2 = v * (SH_TEX_SIZE - 1);
+                    const int x0 = (int)fx2, y0 = (int)fy2;
+                    const int x1 = (x0 + 1 < SH_TEX_SIZE) ? x0 + 1 : x0, y1 = (y0 + 1 < SH_TEX_SIZE) ? y0 + 1 : y0;
+                    const float tx2 = fx2 - x0, ty2 = fy2 - y0;
+                    const float g00 = tx[y0 * SH_TEX_SIZE + x0], g10 = tx[y0 * SH_TEX_SIZE + x1];
+                    const float g01 = tx[y1 * SH_TEX_SIZE + x0], g11 = tx[y1 * SH_TEX_SIZE + x1];
+                    gray = ((g00 * (1.f - tx2) + g10 * tx2) * (1.f - ty2) + (g01 * (1.f - tx2) + g11 * tx2) * ty2) / 255.f;
+                }
+                Im3DVert& V2 = vs[j2 * (N + 1) + i2];
+                V2.x = Q.p[0][0] + u * (Q.p[1][0] - Q.p[0][0]) + v * (Q.p[3][0] - Q.p[0][0]);
+                V2.y = Q.p[0][1] + u * (Q.p[1][1] - Q.p[0][1]) + v * (Q.p[3][1] - Q.p[0][1]);
+                V2.z = Q.p[0][2] + u * (Q.p[1][2] - Q.p[0][2]) + v * (Q.p[3][2] - Q.p[0][2]);
+                V2.nx = 0.f; V2.ny = 0.f; V2.nz = 1.f;
+                V2.u = u; V2.v = v;
+                V2.col = 0xFF000000u | ((uint32_t)(baseB * gray) << 16) | ((uint32_t)(baseG * gray) << 8) | (uint32_t)(baseR * gray);
+            }
+        void* tr = g_Im3DTransform(vs, (N + 1) * (N + 1), nullptr, (unsigned int)g_set.imFlags);
         if (dbg && q == 0) Log("im3d: 5 Transform hasil=%p", tr);
         if (tr)
         {
-            g_Im3DRender(3, idx, 6);               // 3 = daftar segitiga
+            g_Im3DRender(3, gidx, N * N * 6);
             if (dbg && q == 0) Log("im3d: 6 Render selesai");
             g_Im3DEnd();
             if (dbg && q == 0) Log("im3d: 7 End selesai");
