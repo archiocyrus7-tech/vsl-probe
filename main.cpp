@@ -99,9 +99,17 @@ static void SetModel(int mi) { g_mi = mi; g_G = MODELS[mi].g; g_NG = MODELS[mi].
 static float g_pts[NMODELS][NGROUPS][MAXPTS][3];       // posisi bohlam (lokal kendaraan)
 static uint8_t g_ptsOk[NMODELS][NGROUPS][MAXPTS];      // 1 = posisi sudah diketahui
 static int s_gm = 0;                                   // penampung nomor model saat membaca cfg
+static float g_fpos[NMODELS][NGROUPS][MAXPTS][3];      // kandidat posisi: frame
+static float g_gpos[NMODELS][NGROUPS][MAXPTS][3];      // kandidat posisi: pusat geometri
+static uint8_t g_fok[NMODELS][NGROUPS][MAXPTS];
+static uint8_t g_gok[NMODELS][NGROUPS][MAXPTS];
+static uint8_t g_ptsStatic[NMODELS][NGROUPS][MAXPTS];  // posisi dari tabel (Huntley), tidak diubah
+static int g_posApplied = -1;
 static void InitPts()
 {
     memset(g_pts, 0, sizeof(g_pts));
+    memset(g_fpos, 0, sizeof(g_fpos)); memset(g_gpos, 0, sizeof(g_gpos));
+    memset(g_fok, 0, sizeof(g_fok)); memset(g_gok, 0, sizeof(g_gok)); memset(g_ptsStatic, 0, sizeof(g_ptsStatic));
     memset(g_ptsOk, 0, sizeof(g_ptsOk));
     for (int mi = 0; mi < NMODELS; ++mi)
         for (int g = 0; g < MODELS[mi].ng; ++g)
@@ -112,9 +120,11 @@ static void InitPts()
                 {
                     memcpy(g_pts[mi][g][i], p, 3 * sizeof(float));
                     g_ptsOk[mi][g][i] = 1;
+                    g_ptsStatic[mi][g][i] = 1;
                 }
             }
 }
+
 
 struct Settings
 {
@@ -131,6 +141,7 @@ struct Settings
     bool shTint;
     int shMode, shType;
     int imFlags;
+    int lampSrc;           // sumber posisi lampu: 0 frame, 1 pusat geometri, 2 otomatis
     bool imNoTex;
     float imZoff;
     int los;
@@ -142,6 +153,43 @@ struct Settings
     int ovr[NMODELS][NGROUPS];
 };
 static Settings g_set;
+
+// pilih posisi lampu dari kandidat sesuai pengaturan; mengembalikan jumlah lampu yang punya posisi
+static int RecomputePositions()
+{
+    int have = 0;
+    for (int mi = 0; mi < NMODELS; ++mi)
+        for (int g = 0; g < MODELS[mi].ng; ++g)
+            for (int i = 0; i < MODELS[mi].g[g].npts && i < MAXPTS; ++i)
+            {
+                if (g_ptsStatic[mi][g][i]) { ++have; continue; }
+                const float* f = g_fok[mi][g][i] ? g_fpos[mi][g][i] : nullptr;
+                const float* gg = g_gok[mi][g][i] ? g_gpos[mi][g][i] : nullptr;
+                const float* use = nullptr;
+                if (g_set.lampSrc == 0) use = f ? f : gg;
+                else if (g_set.lampSrc == 1) use = gg ? gg : f;
+                else
+                {
+                    // otomatis: frame yang bertumpuk dengan frame lampu lain di model yang sama bukan posisi lampu -> pakai pusat geometri
+                    bool stacked = false;
+                    if (f)
+                        for (int g2 = 0; g2 < MODELS[mi].ng && !stacked; ++g2)
+                            for (int i2 = 0; i2 < MODELS[mi].g[g2].npts && i2 < MAXPTS; ++i2)
+                            {
+                                if (g2 == g && i2 == i) continue;
+                                if (!g_fok[mi][g2][i2] || g_ptsStatic[mi][g2][i2]) continue;
+                                const float* o = g_fpos[mi][g2][i2];
+                                const float dx = o[0] - f[0], dy = o[1] - f[1], dz = o[2] - f[2];
+                                if (dx * dx + dy * dy + dz * dz < 0.03f * 0.03f) { stacked = true; break; }
+                            }
+                    use = (stacked && gg) ? gg : (f ? f : gg);
+                }
+                if (use) { memcpy(g_pts[mi][g][i], use, 3 * sizeof(float)); g_ptsOk[mi][g][i] = 1; ++have; }
+                else g_ptsOk[mi][g][i] = 0;
+            }
+    g_posApplied = g_set.lampSrc;
+    return have;
+}
 static uint32_t g_lastCfgRead = 0;
 static bool g_cfgReadOnce = false;
 
@@ -159,6 +207,7 @@ static void DefaultSettings()
     g_set.shInt = 1.0f; g_set.shScale = 1.0f; g_set.shAng = 0.0f; g_set.shVA = 90.0f;
     g_set.shTint = true;
     g_set.shMode = 2; g_set.shType = 1;
+    g_set.lampSrc = 2;
     g_set.imFlags = 1; g_set.imNoTex = false; g_set.imZoff = 0.05f;
     g_set.los = 0;
     g_set.bias = -0.40f;
@@ -203,6 +252,7 @@ static void ReadCfg()
         else if (sscanf(line, "shtint=%d", &a) == 1) g_set.shTint = a != 0;
         else if (sscanf(line, "shmode=%d", &a) == 1) g_set.shMode = (a >= 0 && a <= 2) ? a : 0;
         else if (sscanf(line, "shtype=%d", &a) == 1) g_set.shType = (a >= 1 && a <= 3) ? a : 1;
+        else if (sscanf(line, "lampsrc=%d", &a) == 1) g_set.lampSrc = (a >= 0 && a <= 2) ? a : 2;
         else if (sscanf(line, "imflags=%d", &a) == 1) g_set.imFlags = (a >= 0 && a <= 31) ? a : 1;
         else if (sscanf(line, "imnotex=%d", &a) == 1) g_set.imNoTex = a != 0;
         else if (sscanf(line, "imzoff=%f", &fv) == 1) { if (fv >= -0.5f && fv < 1.0f) g_set.imZoff = fv; }
@@ -538,16 +588,7 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             if (fr)
             {
                 float pp[3];
-                if (FrameLocalPos(clump, fr, nullptr, pp))
-                {
-                    memcpy(fpA[i], pp, sizeof(pp)); fOk[i] = true;
-                    if (g_ptsOk[g_mi][g][i] && g_cmpLog < 4)
-                    {
-                        ++g_cmpLog;
-                        Log("pos cek model=%d grup=%d lampu=%d: tabel=%.3f,%.3f,%.3f model=%.3f,%.3f,%.3f", MODELS[g_mi].id, g, i,
-                            g_pts[g_mi][g][i][0], g_pts[g_mi][g][i][1], g_pts[g_mi][g][i][2], pp[0], pp[1], pp[2]);
-                    }
-                }
+                if (FrameLocalPos(clump, fr, nullptr, pp)) { memcpy(fpA[i], pp, sizeof(pp)); fOk[i] = true; }
             }
             int k = -1;
             if (fr) for (int a = 0; a < col.n; ++a) if (col.frame[a] == fr) { k = a; break; }
@@ -557,10 +598,9 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             int nm = 0; void** mats = nullptr;
             if (!ReadPtr(atom, g_lay.atomGeom, &geom) || !GeomOk(geom, g_lay, &nm, &mats)) { ++bad; continue; }
             {
-                // pusat bola pembatas geometri (RpGeometry -> morphTarget +92 -> boundingSphere +4), dipindah ke ruang kendaraan
-                void* mo = nullptr;
+                // bola pembatas atomic (setelah pointer geometri): pusat + radius di ruang objek, dipindah ke ruang kendaraan
                 float cc[4];
-                if (ReadPtr(geom, 92, &mo) && mo && SafeRead((char*)mo + 4, cc, sizeof(cc)) && cc[3] > 0.f && cc[3] < 10.f)
+                if (SafeRead((char*)atom + g_lay.atomGeom + 4, cc, sizeof(cc)) && cc[3] > 0.f && cc[3] < 10.f)
                 {
                     float gp[3];
                     if (FrameLocalPos(clump, fr, cc, gp)) { memcpy(gpA[i], gp, sizeof(gp)); gOk[i] = true; }
@@ -590,41 +630,30 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             for (int m = 0; m < L.n; ++m) ReadPtr(mats, m * (int)sizeof(void*), &L.m[m]);
             ++found;
         }
-        // putuskan sumber posisi untuk lampu yang posisinya belum diketahui (model non-Huntley)
+        // simpan kandidat posisi (frame dan pusat geometri) untuk lampu yang bukan dari tabel
+        for (int i = 0; i < G.npts && i < MAXPTS; ++i)
         {
-            bool needAny = false;
-            for (int i = 0; i < G.npts && i < MAXPTS; ++i) if (!g_ptsOk[g_mi][g][i] && (fOk[i] || gOk[i])) needAny = true;
-            if (needAny)
+            if (g_ptsStatic[g_mi][g][i])
             {
-                float fmin[3] = { 1e9f, 1e9f, 1e9f }, fmax[3] = { -1e9f, -1e9f, -1e9f };
-                float gmin[3] = { 1e9f, 1e9f, 1e9f }, gmax[3] = { -1e9f, -1e9f, -1e9f };
-                int nf = 0, ng = 0;
-                for (int i = 0; i < G.npts && i < MAXPTS; ++i)
+                if (g_cmpLog < 4 && fOk[i])
                 {
-                    if (fOk[i]) { ++nf; for (int k2 = 0; k2 < 3; ++k2) { if (fpA[i][k2] < fmin[k2]) fmin[k2] = fpA[i][k2]; if (fpA[i][k2] > fmax[k2]) fmax[k2] = fpA[i][k2]; } }
-                    if (gOk[i]) { ++ng; for (int k2 = 0; k2 < 3; ++k2) { if (gpA[i][k2] < gmin[k2]) gmin[k2] = gpA[i][k2]; if (gpA[i][k2] > gmax[k2]) gmax[k2] = gpA[i][k2]; } }
+                    ++g_cmpLog;
+                    Log("pos cek model=%d grup=%d lampu=%d: tabel=%.3f,%.3f,%.3f frame=%.3f,%.3f,%.3f geometri(%d)=%.3f,%.3f,%.3f", MODELS[g_mi].id, g, i,
+                        g_pts[g_mi][g][i][0], g_pts[g_mi][g][i][1], g_pts[g_mi][g][i][2], fpA[i][0], fpA[i][1], fpA[i][2],
+                        gOk[i] ? 1 : 0, gpA[i][0], gpA[i][1], gpA[i][2]);
                 }
-                float sf = 0.f, sg = 0.f;
-                for (int k2 = 0; k2 < 3; ++k2)
-                {
-                    if (nf > 0 && fmax[k2] - fmin[k2] > sf) sf = fmax[k2] - fmin[k2];
-                    if (ng > 0 && gmax[k2] - gmin[k2] > sg) sg = gmax[k2] - gmin[k2];
-                }
-                // frame bertumpuk di satu titik tapi geometri tersebar -> posisi frame bukan posisi lampu, pakai pusat geometri
-                const bool useGeom = (ng >= nf && ng > 0 && nf > 1 && sf < 0.05f && sg > 0.15f);
-                Log("pos sumber model=%d grup=%d '%s': frame=%d geometri=%d sebaran frame=%.3f geometri=%.3f -> %s", MODELS[g_mi].id, g, G.name, nf, ng, sf, sg,
-                    useGeom ? "pusat geometri" : "frame");
-                for (int i = 0; i < 3 && i < G.npts && i < MAXPTS; ++i)
-                    Log("pos diag model=%d grup=%d lampu=%d: frame(%d)=%.2f,%.2f,%.2f geometri(%d)=%.2f,%.2f,%.2f", MODELS[g_mi].id, g, i,
-                        fOk[i] ? 1 : 0, fpA[i][0], fpA[i][1], fpA[i][2], gOk[i] ? 1 : 0, gpA[i][0], gpA[i][1], gpA[i][2]);
-                for (int i = 0; i < G.npts && i < MAXPTS; ++i)
-                {
-                    if (g_ptsOk[g_mi][g][i]) continue;
-                    const float* src = useGeom ? (gOk[i] ? gpA[i] : nullptr) : (fOk[i] ? fpA[i] : nullptr);
-                    if (src) { memcpy(g_pts[g_mi][g][i], src, 3 * sizeof(float)); g_ptsOk[g_mi][g][i] = 1; ++newPos; }
-                }
+                continue;
             }
+            if (fOk[i]) { memcpy(g_fpos[g_mi][g][i], fpA[i], sizeof(fpA[i])); g_fok[g_mi][g][i] = 1; }
+            if (gOk[i]) { memcpy(g_gpos[g_mi][g][i], gpA[i], sizeof(gpA[i])); g_gok[g_mi][g][i] = 1; }
+            if (i < 3)
+                Log("pos diag model=%d grup=%d '%s' lampu=%d: frame(%d)=%.2f,%.2f,%.2f geometri(%d)=%.2f,%.2f,%.2f", MODELS[g_mi].id, g, G.name, i,
+                    fOk[i] ? 1 : 0, fpA[i][0], fpA[i][1], fpA[i][2], gOk[i] ? 1 : 0, gpA[i][0], gpA[i][1], gpA[i][2]);
         }
+    }
+    {
+        const int before = 0;
+        newPos = RecomputePositions() - before;
     }
     Log("cache: kendaraan=%p atomic=%d material=%d  bohlam ketemu=%d hilang=%d tidak valid=%d posisi-baru=%d model=%d", self, col.n, c->nAll, found, missing, bad, newPos, MODELS[g_mi].id);
     if (found > 0) FixLedGeomFlags(c);
@@ -839,6 +868,7 @@ static void OnVehiclePreRender(void* self)
     if (!c->valid) return;
 
     if (!g_litValid || g_litStamp != now) ComputeLit(now);
+    if (g_posApplied != g_set.lampSrc) RecomputePositions();
     SetModel(mi);                                          // ComputeLit mengubah model aktif
     ApplyColors(c);
     RegisterLamps(self, c);
