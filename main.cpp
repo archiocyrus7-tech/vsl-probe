@@ -435,11 +435,11 @@ static bool AutoDetectLayout(void* atom, void* geomHint)
 static void FixLedGeomFlags(Cache* c);
 
 // posisi sebuah frame relatif terhadap frame akar kendaraan (rantai matriks "modelling" sampai akar)
-static bool FrameLocalPos(void* clump, void* fr, float* out)
+static bool FrameLocalPos(void* clump, void* fr, const float* p0, float* out)
 {
     void* root = nullptr;
     if (!ReadPtr(clump, OFS_ATOM_PARENT, &root) || !root) return false;
-    float p[3] = { 0.f, 0.f, 0.f };
+    float p[3] = { p0 ? p0[0] : 0.f, p0 ? p0[1] : 0.f, p0 ? p0[2] : 0.f };
     void* f = fr;
     for (int depth = 0; f && f != root && depth < 16; ++depth)
     {
@@ -527,6 +527,9 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
     for (int g = 0; g < g_NG; ++g)
     {
         const Group& G = GROUPS[g];
+        float fpA[MAXPTS][3], gpA[MAXPTS][3];
+        bool fOk[MAXPTS] = {}, gOk[MAXPTS] = {};
+        memset(fpA, 0, sizeof(fpA)); memset(gpA, 0, sizeof(gpA));
         for (int i = 0; i < G.npts && i < MAXPTS; ++i)
         {
             char name[96];
@@ -535,10 +538,10 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             if (fr)
             {
                 float pp[3];
-                if (FrameLocalPos(clump, fr, pp))
+                if (FrameLocalPos(clump, fr, nullptr, pp))
                 {
-                    if (!g_ptsOk[g_mi][g][i]) { memcpy(g_pts[g_mi][g][i], pp, 3 * sizeof(float)); g_ptsOk[g_mi][g][i] = 1; ++newPos; }
-                    else if (g_cmpLog < 4)
+                    memcpy(fpA[i], pp, sizeof(pp)); fOk[i] = true;
+                    if (g_ptsOk[g_mi][g][i] && g_cmpLog < 4)
                     {
                         ++g_cmpLog;
                         Log("pos cek model=%d grup=%d lampu=%d: tabel=%.3f,%.3f,%.3f model=%.3f,%.3f,%.3f", MODELS[g_mi].id, g, i,
@@ -553,6 +556,16 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             void* geom = nullptr;
             int nm = 0; void** mats = nullptr;
             if (!ReadPtr(atom, g_lay.atomGeom, &geom) || !GeomOk(geom, g_lay, &nm, &mats)) { ++bad; continue; }
+            {
+                // pusat bola pembatas geometri (RpGeometry -> morphTarget +92 -> boundingSphere +4), dipindah ke ruang kendaraan
+                void* mo = nullptr;
+                float cc[4];
+                if (ReadPtr(geom, 92, &mo) && mo && SafeRead((char*)mo + 4, cc, sizeof(cc)) && cc[3] > 0.f && cc[3] < 10.f)
+                {
+                    float gp[3];
+                    if (FrameLocalPos(clump, fr, cc, gp)) { memcpy(gpA[i], gp, sizeof(gp)); gOk[i] = true; }
+                }
+            }
             Lamp& L = c->lamp[g][i];
             // bingkai: atomic yang frame-nya adalah induk frame bohlam
             void* pf = nullptr;
@@ -576,6 +589,41 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             L.n = nm > 4 ? 4 : nm;
             for (int m = 0; m < L.n; ++m) ReadPtr(mats, m * (int)sizeof(void*), &L.m[m]);
             ++found;
+        }
+        // putuskan sumber posisi untuk lampu yang posisinya belum diketahui (model non-Huntley)
+        {
+            bool needAny = false;
+            for (int i = 0; i < G.npts && i < MAXPTS; ++i) if (!g_ptsOk[g_mi][g][i] && (fOk[i] || gOk[i])) needAny = true;
+            if (needAny)
+            {
+                float fmin[3] = { 1e9f, 1e9f, 1e9f }, fmax[3] = { -1e9f, -1e9f, -1e9f };
+                float gmin[3] = { 1e9f, 1e9f, 1e9f }, gmax[3] = { -1e9f, -1e9f, -1e9f };
+                int nf = 0, ng = 0;
+                for (int i = 0; i < G.npts && i < MAXPTS; ++i)
+                {
+                    if (fOk[i]) { ++nf; for (int k2 = 0; k2 < 3; ++k2) { if (fpA[i][k2] < fmin[k2]) fmin[k2] = fpA[i][k2]; if (fpA[i][k2] > fmax[k2]) fmax[k2] = fpA[i][k2]; } }
+                    if (gOk[i]) { ++ng; for (int k2 = 0; k2 < 3; ++k2) { if (gpA[i][k2] < gmin[k2]) gmin[k2] = gpA[i][k2]; if (gpA[i][k2] > gmax[k2]) gmax[k2] = gpA[i][k2]; } }
+                }
+                float sf = 0.f, sg = 0.f;
+                for (int k2 = 0; k2 < 3; ++k2)
+                {
+                    if (nf > 0 && fmax[k2] - fmin[k2] > sf) sf = fmax[k2] - fmin[k2];
+                    if (ng > 0 && gmax[k2] - gmin[k2] > sg) sg = gmax[k2] - gmin[k2];
+                }
+                // frame bertumpuk di satu titik tapi geometri tersebar -> posisi frame bukan posisi lampu, pakai pusat geometri
+                const bool useGeom = (ng >= nf && ng > 0 && nf > 1 && sf < 0.05f && sg > 0.15f);
+                Log("pos sumber model=%d grup=%d '%s': frame=%d geometri=%d sebaran frame=%.3f geometri=%.3f -> %s", MODELS[g_mi].id, g, G.name, nf, ng, sf, sg,
+                    useGeom ? "pusat geometri" : "frame");
+                for (int i = 0; i < 3 && i < G.npts && i < MAXPTS; ++i)
+                    Log("pos diag model=%d grup=%d lampu=%d: frame(%d)=%.2f,%.2f,%.2f geometri(%d)=%.2f,%.2f,%.2f", MODELS[g_mi].id, g, i,
+                        fOk[i] ? 1 : 0, fpA[i][0], fpA[i][1], fpA[i][2], gOk[i] ? 1 : 0, gpA[i][0], gpA[i][1], gpA[i][2]);
+                for (int i = 0; i < G.npts && i < MAXPTS; ++i)
+                {
+                    if (g_ptsOk[g_mi][g][i]) continue;
+                    const float* src = useGeom ? (gOk[i] ? gpA[i] : nullptr) : (fOk[i] ? fpA[i] : nullptr);
+                    if (src) { memcpy(g_pts[g_mi][g][i], src, 3 * sizeof(float)); g_ptsOk[g_mi][g][i] = 1; ++newPos; }
+                }
+            }
         }
     }
     Log("cache: kendaraan=%p atomic=%d material=%d  bohlam ketemu=%d hilang=%d tidak valid=%d posisi-baru=%d model=%d", self, col.n, c->nAll, found, missing, bad, newPos, MODELS[g_mi].id);
