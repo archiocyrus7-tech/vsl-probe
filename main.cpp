@@ -14,9 +14,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
-#include "vsl_data.h"
+#include "vsl_models.h"
 #include "vsl_shadow.h"
-#include "vsl_diag.h"
 
 MYMOD(vsl.huntley.led, VSL Huntley LED, 1.0, VSL port)
 
@@ -91,6 +90,32 @@ static volatile uint32_t* g_pTime = nullptr;
 static bool g_ok = false;
 
 // ---------- pengaturan dari menu ----------
+// ---------- model kendaraan aktif: tiap kendaraan VSL punya tabel grup sendiri ----------
+static int g_mi = 0;
+static const Group* g_G = nullptr;
+static int g_NG = 0;
+#define GROUPS g_G
+static void SetModel(int mi) { g_mi = mi; g_G = MODELS[mi].g; g_NG = MODELS[mi].ng; }
+static float g_pts[NMODELS][NGROUPS][MAXPTS][3];       // posisi bohlam (lokal kendaraan)
+static uint8_t g_ptsOk[NMODELS][NGROUPS][MAXPTS];      // 1 = posisi sudah diketahui
+static int s_gm = 0;                                   // penampung nomor model saat membaca cfg
+static void InitPts()
+{
+    memset(g_pts, 0, sizeof(g_pts));
+    memset(g_ptsOk, 0, sizeof(g_ptsOk));
+    for (int mi = 0; mi < NMODELS; ++mi)
+        for (int g = 0; g < MODELS[mi].ng; ++g)
+            for (int i = 0; i < MODELS[mi].g[g].npts && i < MAXPTS; ++i)
+            {
+                const float* p = MODELS[mi].g[g].pts[i];
+                if (p[0] != 0.f || p[1] != 0.f || p[2] != 0.f)
+                {
+                    memcpy(g_pts[mi][g][i], p, 3 * sizeof(float));
+                    g_ptsOk[mi][g][i] = 1;
+                }
+            }
+}
+
 struct Settings
 {
     bool enabled;
@@ -111,10 +136,10 @@ struct Settings
     int los;
     float bias;
     float scale;
-    float gsize[NGROUPS];
-    uint8_t gcol[NGROUPS][3];
-    bool on[NGROUPS];
-    int ovr[NGROUPS];
+    float gsize[NMODELS][NGROUPS];
+    uint8_t gcol[NMODELS][NGROUPS][3];
+    bool on[NMODELS][NGROUPS];
+    int ovr[NMODELS][NGROUPS];
 };
 static Settings g_set;
 static uint32_t g_lastCfgRead = 0;
@@ -138,12 +163,16 @@ static void DefaultSettings()
     g_set.los = 0;
     g_set.bias = -0.40f;
     g_set.scale = 1.0f;
-    for (int g = 0; g < NGROUPS; ++g)
-    {
-        g_set.gsize[g] = GROUPS[g].size;
-        for (int k = 0; k < 3; ++k) g_set.gcol[g][k] = GROUPS[g].c1[k];
-    }
-    for (int g = 0; g < NGROUPS; ++g) { g_set.on[g] = true; g_set.ovr[g] = 0; }
+    memset(g_set.gsize, 0, sizeof(g_set.gsize));
+    memset(g_set.gcol, 0, sizeof(g_set.gcol));
+    for (int mi = 0; mi < NMODELS; ++mi)
+        for (int g = 0; g < MODELS[mi].ng; ++g)
+        {
+            g_set.gsize[mi][g] = MODELS[mi].g[g].size;
+            for (int k = 0; k < 3; ++k) g_set.gcol[mi][g][k] = MODELS[mi].g[g].c1[k];
+            g_set.on[mi][g] = true;
+            g_set.ovr[mi][g] = 0;
+        }
 }
 
 static void ReadCfg()
@@ -177,21 +206,24 @@ static void ReadCfg()
         else if (sscanf(line, "imflags=%d", &a) == 1) g_set.imFlags = (a >= 0 && a <= 31) ? a : 1;
         else if (sscanf(line, "imnotex=%d", &a) == 1) g_set.imNoTex = a != 0;
         else if (sscanf(line, "imzoff=%f", &fv) == 1) { if (fv >= -0.5f && fv < 1.0f) g_set.imZoff = fv; }
-        else if (sscanf(line, "gs%d=%f", &gi, &fv) == 2) { if (gi >= 1 && gi <= NGROUPS && fv > 0.f && fv < 5.f) g_set.gsize[gi - 1] = fv; }
-        else if (sscanf(line, "gc%d=%d,%d,%d", &gi, &a, &b, &c3) == 4)
+        else if (sscanf(line, "gs%d_%d=%f", &s_gm, &gi, &fv) == 3)
         {
-            if (gi >= 1 && gi <= NGROUPS)
+            if (s_gm >= 1 && s_gm <= NMODELS && gi >= 1 && gi <= MODELS[s_gm - 1].ng && fv > 0.f && fv < 5.f) g_set.gsize[s_gm - 1][gi - 1] = fv;
+        }
+        else if (sscanf(line, "gc%d_%d=%d,%d,%d", &s_gm, &gi, &a, &b, &c3) == 5)
+        {
+            if (s_gm >= 1 && s_gm <= NMODELS && gi >= 1 && gi <= MODELS[s_gm - 1].ng)
             {
-                g_set.gcol[gi - 1][0] = (uint8_t)a; g_set.gcol[gi - 1][1] = (uint8_t)b; g_set.gcol[gi - 1][2] = (uint8_t)c3;
+                g_set.gcol[s_gm - 1][gi - 1][0] = (uint8_t)a; g_set.gcol[s_gm - 1][gi - 1][1] = (uint8_t)b; g_set.gcol[s_gm - 1][gi - 1][2] = (uint8_t)c3;
             }
         }
         else if (sscanf(line, "test=%d", &a) == 1) g_set.test = (a >= 0 && a <= 5) ? a : 0;
-        else if (sscanf(line, "g%d=%d,%d", &gi, &a, &b) == 3)
+        else if (sscanf(line, "g%d_%d=%d,%d", &s_gm, &gi, &a, &b) == 4)
         {
-            if (gi >= 1 && gi <= NGROUPS)
+            if (s_gm >= 1 && s_gm <= NMODELS && gi >= 1 && gi <= MODELS[s_gm - 1].ng)
             {
-                g_set.on[gi - 1] = a != 0;
-                g_set.ovr[gi - 1] = (b >= 0 && b <= NPATTERNS) ? b : 0;
+                g_set.on[s_gm - 1][gi - 1] = a != 0;
+                g_set.ovr[s_gm - 1][gi - 1] = (b >= 0 && b <= NPATTERNS) ? b : 0;
             }
         }
     }
@@ -205,22 +237,21 @@ static void ReadCfg()
 }
 
 // ---------- mesin pola ----------
-static uint8_t g_lit[NGROUPS][MAXPTS];
-static uint8_t g_litAny[NGROUPS];
+static uint8_t g_lit[NMODELS][NGROUPS][MAXPTS];
+static uint8_t g_litAny[NMODELS][NGROUPS];
 static uint32_t g_litStamp = 0;
 static bool g_litValid = false;
 
-static void ComputeLit(uint32_t t)
+static void ComputeLitModel(double now)
 {
-    double now = (double)t * g_set.speed;
-    for (int g = 0; g < NGROUPS; ++g)
+    for (int g = 0; g < g_NG; ++g)
     {
-        memset(g_lit[g], 0, MAXPTS);
-        g_litAny[g] = 0;
-        if (!g_set.enabled || !g_set.on[g]) continue;
+        memset(g_lit[g_mi][g], 0, MAXPTS);
+        g_litAny[g_mi][g] = 0;
+        if (!g_set.enabled || !g_set.on[g_mi][g]) continue;
         const Group& G = GROUPS[g];
         int pat = -1;
-        if (g_set.ovr[g] > 0) pat = g_set.ovr[g] - 1;
+        if (g_set.ovr[g_mi][g] > 0) pat = g_set.ovr[g_mi][g] - 1;
         else
         {
             double tt = fmod(now, (double)G.total);
@@ -249,9 +280,19 @@ static void ComputeLit(uint32_t t)
                 if (!g_set.wrap) continue;
                 idx = i % n;
             }
-            g_lit[g][i] = (row[idx] != '0') ? 1 : 0;
-            if (g_lit[g][i]) g_litAny[g] = 1;
+            g_lit[g_mi][g][i] = (row[idx] != '0') ? 1 : 0;
+            if (g_lit[g_mi][g][i]) g_litAny[g_mi][g] = 1;
         }
+    }
+}
+
+static void ComputeLit(uint32_t t)
+{
+    const double now = (double)t * g_set.speed;
+    for (int mi = 0; mi < NMODELS; ++mi)
+    {
+        SetModel(mi);
+        ComputeLitModel(now);
     }
     g_litStamp = t;
     g_litValid = true;
@@ -393,6 +434,32 @@ static bool AutoDetectLayout(void* atom, void* geomHint)
 
 static void FixLedGeomFlags(Cache* c);
 
+// posisi sebuah frame relatif terhadap frame akar kendaraan (rantai matriks "modelling" sampai akar)
+static bool FrameLocalPos(void* clump, void* fr, float* out)
+{
+    void* root = nullptr;
+    if (!ReadPtr(clump, OFS_ATOM_PARENT, &root) || !root) return false;
+    float p[3] = { 0.f, 0.f, 0.f };
+    void* f = fr;
+    for (int depth = 0; f && f != root && depth < 16; ++depth)
+    {
+        float m[16];
+        if (!SafeRead((char*)f + OFS_FRAME_MAT, m, 64)) return false;
+        const float x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+        const float y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+        const float z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
+        p[0] = x; p[1] = y; p[2] = z;
+        void* pf = nullptr;
+        if (!ReadPtr(f, OFS_FRAME_PARENT, &pf)) return false;
+        f = pf;
+    }
+    if (f != root) return false;
+    out[0] = p[0]; out[1] = p[1]; out[2] = p[2];
+    for (int k = 0; k < 3; ++k) if (!(fabsf(out[k]) < 50.f)) return false;
+    return true;
+}
+static int g_cmpLog = 0;
+
 static Cache* BuildCache(void* self, void* clump, void* probe)
 {
     Cache* c = nullptr;
@@ -409,7 +476,7 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
     if (!g_layChecked)
     {
         g_layChecked = true;
-        void* fr = GetFrameFromName(clump, "lightbar-led-1");
+        void* fr = probe;
         void* atom = nullptr;
         for (int a = 0; a < col.n; ++a) if (col.frame[a] == fr) { atom = col.atom[a]; break; }
         if (!atom) { Log("atomic untuk lightbar-led-1 tidak ketemu"); g_layChecked = false; c->valid = false; return c; }
@@ -456,8 +523,8 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
 
     c->natoms = col.n;
     for (int a = 0; a < col.n; ++a) c->atoms[a] = col.atom[a];
-    int found = 0, missing = 0, bad = 0, linked = 0;
-    for (int g = 0; g < NGROUPS; ++g)
+    int found = 0, missing = 0, bad = 0, linked = 0, newPos = 0;
+    for (int g = 0; g < g_NG; ++g)
     {
         const Group& G = GROUPS[g];
         for (int i = 0; i < G.npts && i < MAXPTS; ++i)
@@ -465,6 +532,20 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             char name[96];
             snprintf(name, sizeof(name), "%s%d", G.prefix, i + 1);
             void* fr = GetFrameFromName(clump, name);
+            if (fr)
+            {
+                float pp[3];
+                if (FrameLocalPos(clump, fr, pp))
+                {
+                    if (!g_ptsOk[g_mi][g][i]) { memcpy(g_pts[g_mi][g][i], pp, 3 * sizeof(float)); g_ptsOk[g_mi][g][i] = 1; ++newPos; }
+                    else if (g_cmpLog < 4)
+                    {
+                        ++g_cmpLog;
+                        Log("pos cek model=%d grup=%d lampu=%d: tabel=%.3f,%.3f,%.3f model=%.3f,%.3f,%.3f", MODELS[g_mi].id, g, i,
+                            g_pts[g_mi][g][i][0], g_pts[g_mi][g][i][1], g_pts[g_mi][g][i][2], pp[0], pp[1], pp[2]);
+                    }
+                }
+            }
             int k = -1;
             if (fr) for (int a = 0; a < col.n; ++a) if (col.frame[a] == fr) { k = a; break; }
             if (k < 0) { ++missing; continue; }
@@ -497,7 +578,7 @@ static Cache* BuildCache(void* self, void* clump, void* probe)
             ++found;
         }
     }
-    Log("cache: kendaraan=%p atomic=%d material=%d  bohlam ketemu=%d hilang=%d tidak valid=%d", self, col.n, c->nAll, found, missing, bad);
+    Log("cache: kendaraan=%p atomic=%d material=%d  bohlam ketemu=%d hilang=%d tidak valid=%d posisi-baru=%d model=%d", self, col.n, c->nAll, found, missing, bad, newPos, MODELS[g_mi].id);
     if (found > 0) FixLedGeomFlags(c);
     // bingkai bohlam ("led-case" = 2342 vertex, "led berjejer*" = 2280 vertex): nyalakan flag kalikan-warna agar tampil sesuai warna materialnya
     {
@@ -563,7 +644,7 @@ static int g_prevTest = -1;
 
 static void SetLedVisible(Cache* c, bool visible)
 {
-    for (int g = 0; g < NGROUPS; ++g)
+    for (int g = 0; g < g_NG; ++g)
         for (int i = 0; i < GROUPS[g].npts && i < MAXPTS; ++i)
         {
             void* atom = c->lamp[g][i].atom;
@@ -575,7 +656,7 @@ static void SetLedVisible(Cache* c, bool visible)
 
 static void FixLedGeomFlags(Cache* c)
 {
-    for (int g = 0; g < NGROUPS; ++g)
+    for (int g = 0; g < g_NG; ++g)
         for (int i = 0; i < GROUPS[g].npts && i < MAXPTS; ++i)
         {
             void* atom = c->lamp[g][i].atom;
@@ -620,7 +701,7 @@ static void ApplyColors(Cache* c)
 
     // diagnostik: apakah warna yang kita tulis frame lalu ditimpa pihak lain?
     const Lamp* first = nullptr;
-    for (int g = 0; g < NGROUPS && !first; ++g)
+    for (int g = 0; g < g_NG && !first; ++g)
         for (int i = 0; i < GROUPS[g].npts && i < MAXPTS; ++i)
             if (c->lamp[g][i].n > 0) { first = &c->lamp[g][i]; break; }
     static int overwrites = 0;
@@ -632,14 +713,14 @@ static void ApplyColors(Cache* c)
     }
 
     static const uint8_t RED[3] = { 255, 0, 0 };
-    for (int g = 0; g < NGROUPS; ++g)
+    for (int g = 0; g < g_NG; ++g)
     {
         const Group& G = GROUPS[g];
         for (int i = 0; i < G.npts && i < MAXPTS; ++i)
         {
             const Lamp& L = c->lamp[g][i];
             if (L.n <= 0) continue;
-            const uint8_t* col = (g_set.test == 1 || g_set.test == 4) ? RED : (g_lit[g][i] ? G.onc : G.offc);
+            const uint8_t* col = (g_set.test == 1 || g_set.test == 4) ? RED : (g_lit[g_mi][g][i] ? G.onc : G.offc);
             for (int m = 0; m < L.n; ++m)
             {
                 uint8_t* p = (uint8_t*)L.m[m] + g_lay.matColor;
@@ -650,7 +731,7 @@ static void ApplyColors(Cache* c)
             {
                 static const uint8_t BLACK[3] = { 0, 0, 0 };    // warna asli bingkai di DFF
                 bool shared = G.npts <= 4;                      // batang LED: satu bingkai untuk 4 bohlam
-                bool lit = shared ? (g_litAny[g] != 0) : (g_lit[g][i] != 0);
+                bool lit = shared ? (g_litAny[g_mi][g] != 0) : (g_lit[g_mi][g][i] != 0);
                 const uint8_t* cc = (g_set.caseFollow && lit) ? G.onc : BLACK;
                 for (int m = 0; m < L.cn; ++m)
                 {
@@ -664,7 +745,6 @@ static void ApplyColors(Cache* c)
 
 static void RegisterLamps(void* self, Cache* c);
 static void RegisterShadows(void* self, Cache* c);
-static void DiagVehicle(void* self, void* clump);
 
 static int g_logCount = 0;
 
@@ -682,10 +762,23 @@ static void OnVehiclePreRender(void* self)
     if (!clump || ((uintptr_t)clump & 3)) return;
     if (((uint8_t*)clump)[0] != 2) return;                 // bukan rpCLUMP
 
-    DiagVehicle(self, clump);
+    // kenali kendaraan lewat nomor modelnya (16-bit di +0x26) lalu cocokkan dengan tabel VSL
+    unsigned short mid = 0;
+    if (!SafeRead((char*)self + 0x26, &mid, sizeof(mid))) return;
+    int mi = -1;
+    for (int k = 0; k < NMODELS; ++k) if (MODELS[k].id == (int)mid) { mi = k; break; }
+    if (mi < 0) return;                                    // bukan kendaraan VSL
+    SetModel(mi);
 
-    void* probe = GetFrameFromName(clump, "lightbar-led-1");
-    if (!probe) return;                                    // bukan Huntley ber-lightbar
+    // bingkai penanda: bohlam pertama yang ada pada model ini
+    void* probe = nullptr;
+    for (int g = 0; g < g_NG && !probe; ++g)
+    {
+        char pn[96];
+        snprintf(pn, sizeof(pn), "%s1", GROUPS[g].prefix);
+        probe = GetFrameFromName(clump, pn);
+    }
+    if (!probe) return;                                    // model ini tidak punya LED VSL
 
     Cache* c = nullptr;
     for (int i = 0; i < 16; ++i) if (g_cache[i].self == self) { c = &g_cache[i]; break; }
@@ -698,6 +791,7 @@ static void OnVehiclePreRender(void* self)
     if (!c->valid) return;
 
     if (!g_litValid || g_litStamp != now) ComputeLit(now);
+    SetModel(mi);                                          // ComputeLit mengubah model aktif
     ApplyColors(c);
     RegisterLamps(self, c);
     RegisterShadows(self, c);
@@ -777,16 +871,17 @@ static void RegisterLamps(void* self, Cache* c)
     const float cam[3] = { g_camMm[0] * 0.001f, g_camMm[1] * 0.001f, g_camMm[2] * 0.001f };
     const unsigned slot = (unsigned)(c - g_cache) & 15u;
     int registered = 0;
-    for (int g = 0; g < NGROUPS; ++g)
+    for (int g = 0; g < g_NG; ++g)
     {
         const Group& G = GROUPS[g];
         const float nx = m[0] * G.nrm[0] + m[4] * G.nrm[1] + m[8] * G.nrm[2];
         const float ny = m[1] * G.nrm[0] + m[5] * G.nrm[1] + m[9] * G.nrm[2];
         const float nz = m[2] * G.nrm[0] + m[6] * G.nrm[1] + m[10] * G.nrm[2];
-        const float rad = g_set.gsize[g] * g_set.scale;
+        const float rad = g_set.gsize[g_mi][g] * g_set.scale;
         for (int i = 0; i < G.npts && i < MAXPTS; ++i)
         {
-            const float x = G.pts[i][0], y = G.pts[i][1], z = G.pts[i][2];
+            if (!g_ptsOk[g_mi][g][i]) continue;
+            const float x = g_pts[g_mi][g][i][0], y = g_pts[g_mi][g][i][1], z = g_pts[g_mi][g][i][2];
             float p[3] = { m[12] + m[0] * x + m[4] * y + m[8] * z,
                            m[13] + m[1] * x + m[5] * y + m[9] * z,
                            m[14] + m[2] * x + m[6] * y + m[10] * z };
@@ -798,9 +893,9 @@ static void RegisterLamps(void* self, Cache* c)
                 show = (nx * dx + ny * dy + nz * dz) / d > g_set.bias;
             }
             const unsigned id = 0x56000000u | (slot << 10) | (unsigned)(g * 20 + i);
-            if (g_lit[g][i] && show)
+            if (g_lit[g_mi][g][i] && show)
             {
-                g_RegCorona(id, nullptr, g_set.gcol[g][0], g_set.gcol[g][1], g_set.gcol[g][2], 255, p, rad, 150.0f,
+                g_RegCorona(id, nullptr, g_set.gcol[g_mi][g][0], g_set.gcol[g_mi][g][1], g_set.gcol[g_mi][g][2], 255, p, rad, 150.0f,
                             (unsigned char)G.ctype, (unsigned char)G.flare, 0, (unsigned char)g_set.los, 0, 0.0f, false, 0.0f, false, 60.0f, false, false);
                 if (G.small)
                     g_RegCorona(id + 0x200u, nullptr, 255, 255, 255, 255, p, rad * G.smallScale, 150.0f,
@@ -1098,9 +1193,9 @@ static void RegisterShadows(void* self, Cache* c)
     for (int k = 0; k < NSHADOWS; ++k)
     {
         const ShadowPt& S = SHADOWS[k];
-        if (!g_lit[S.g][S.i]) continue;
-        const Group& G = GROUPS[S.g];
-        const float lx = G.pts[S.i][0] + S.ox, ly = G.pts[S.i][1] + S.oy, lz = G.pts[S.i][2];
+        if (S.veh != MODELS[g_mi].id || S.g >= g_NG || S.i >= MAXPTS) continue;
+        if (!g_lit[g_mi][S.g][S.i] || !g_ptsOk[g_mi][S.g][S.i]) continue;
+        const float lx = g_pts[g_mi][S.g][S.i][0] + S.ox, ly = g_pts[g_mi][S.g][S.i][1] + S.oy, lz = g_pts[g_mi][S.g][S.i][2];
         float p[3] = { m[12] + m[0] * lx + m[4] * ly + m[8] * lz,
                        m[13] + m[1] * lx + m[5] * ly + m[9] * lz,
                        m[14] + m[2] * lx + m[6] * ly + m[10] * lz };
@@ -1112,7 +1207,7 @@ static void RegisterShadows(void* self, Cache* c)
         const float fx = (m[0] * fl0 + m[4] * fl1) * fs, fy = (m[1] * fl0 + m[5] * fl1) * fs;
         const float sx = (m[0] * sl0 + m[4] * sl1) * ss, sy = (m[1] * sl0 + m[5] * sl1) * ss;
         float k2 = S.inten * g_set.shInt;
-        int r = (int)(g_set.gcol[S.g][0] * k2), gg = (int)(g_set.gcol[S.g][1] * k2), b = (int)(g_set.gcol[S.g][2] * k2);
+        int r = (int)(g_set.gcol[g_mi][S.g][0] * k2), gg = (int)(g_set.gcol[g_mi][S.g][1] * k2), b = (int)(g_set.gcol[g_mi][S.g][2] * k2);
         if (r > 255) r = 255; if (gg > 255) gg = 255; if (b > 255) b = 255;
         const int id = (int)(((uintptr_t)self & 0x0FFFFFFFu) + 0x100u * slot + (unsigned)k);
         if (mode == 2)
@@ -1139,7 +1234,7 @@ static void RegisterShadows(void* self, Cache* c)
                     Q.p[k][1] = p[1] + sgn[k][0] * sy + sgn[k][1] * fy;
                     Q.p[k][2] = gz;
                 }
-                int cr = (int)(g_set.gcol[S.g][0] * k2), cg = (int)(g_set.gcol[S.g][1] * k2), cb = (int)(g_set.gcol[S.g][2] * k2);
+                int cr = (int)(g_set.gcol[g_mi][S.g][0] * k2), cg = (int)(g_set.gcol[g_mi][S.g][1] * k2), cb = (int)(g_set.gcol[g_mi][S.g][2] * k2);
                 if (cr > 255) cr = 255; if (cg > 255) cg = 255; if (cb > 255) cb = 255;
                 if (cr < 0) cr = 0; if (cg < 0) cg = 0; if (cb < 0) cb = 0;
                 Q.col = 0xFF000000u | ((uint32_t)cb << 16) | ((uint32_t)cg << 8) | (uint32_t)cr;
@@ -1153,7 +1248,7 @@ static void RegisterShadows(void* self, Cache* c)
         int sr = r, sg = gg, sb = b;
         if (g_set.shTint)
         {
-            void* tt = GetTintTexture(S.tex == 2 ? 0 : 1, (int)g_set.gcol[S.g][0], (int)g_set.gcol[S.g][1], (int)g_set.gcol[S.g][2]);
+            void* tt = GetTintTexture(S.tex == 2 ? 0 : 1, (int)g_set.gcol[g_mi][S.g][0], (int)g_set.gcol[g_mi][S.g][1], (int)g_set.gcol[g_mi][S.g][2]);
             if (tt)
             {
                 tx = tt;
@@ -1169,9 +1264,9 @@ static void RegisterShadows(void* self, Cache* c)
             int inten = (int)(255.f * k2);
             if (inten > 255) inten = 255;
             if (inten < 0) inten = 0;
-            int dr = tinted ? 255 : (int)g_set.gcol[S.g][0];
-            int dg = tinted ? 255 : (int)g_set.gcol[S.g][1];
-            int db = tinted ? 255 : (int)g_set.gcol[S.g][2];
+            int dr = tinted ? 255 : (int)g_set.gcol[g_mi][S.g][0];
+            int dg = tinted ? 255 : (int)g_set.gcol[g_mi][S.g][1];
+            int db = tinted ? 255 : (int)g_set.gcol[g_mi][S.g][2];
             if (dr < 0) dr = 0; if (dr > 255) dr = 255;
             if (dg < 0) dg = 0; if (dg > 255) dg = 255;
             if (db < 0) db = 0; if (db > 255) db = 255;
@@ -1192,41 +1287,6 @@ static void RegisterShadows(void* self, Cache* c)
         ++g_shLog;
         Log("shadow: mode=%d(aktif %d) tipe=%d tint=%d kendaraan=%p dikirim=%d rgb=%d,%d,%d", g_set.shMode, mode, g_set.shType, g_set.shTint ? 1 : 0, self, stored, g_shRGB[0], g_shRGB[1], g_shRGB[2]);
     }
-}
-
-// ---------- diagnostik: bingkai (frame) lampu apa saja yang dimiliki tiap kendaraan di game ini ----------
-static void* g_diagSeen[64];
-static int g_nDiagSeen = 0;
-
-static void DiagVehicle(void* self, void* clump)
-{
-    for (int i = 0; i < g_nDiagSeen; ++i) if (g_diagSeen[i] == self) return;
-    if (g_nDiagSeen >= 64) return;
-    g_diagSeen[g_nDiagSeen++] = self;
-    int hits = 0;
-    char line[600];
-    line[0] = 0;
-    for (int d = 0; d < NDIAG; ++d)
-    {
-        int found = 0;
-        for (int i = 1; i <= DIAG[d].n; ++i)
-        {
-            char nm[96];
-            snprintf(nm, sizeof(nm), "%s%d", DIAG[d].prefix, i);
-            if (GetFrameFromName(clump, nm)) ++found;
-        }
-        if (found > 0)
-        {
-            ++hits;
-            Log("diag kendaraan=%p cocok: veh=%d grup=%d '%s' prefix=%s ditemukan=%d/%d", self, DIAG[d].veh, DIAG[d].idx, DIAG[d].name, DIAG[d].prefix, found, DIAG[d].n);
-        }
-    }
-    // kandidat letak nomor model di objek kendaraan (nilai 16-bit di 0x20..0x30)
-    unsigned short w[9];
-    bool ok = SafeRead((char*)self + 0x20, w, sizeof(w));
-    if (ok) Log("diag kendaraan=%p cocok=%d u16@0x20..0x30: %u %u %u %u %u %u %u %u %u", self, hits, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8]);
-    else Log("diag kendaraan=%p cocok=%d (nomor model tidak terbaca)", self, hits);
-    (void)line;
 }
 
 // Dipanggil script Lua sekali per frame: posisi kamera (mm), penunjuk kendaraan aktif, bendera (bit0 = kamera valid).
@@ -1371,7 +1431,9 @@ static void ScanExports(const char* path)
 ON_MOD_LOAD()
 {
     InitPaths();
-    Log("== VSL Huntley LED 0.1 mulai (shadow) ==");
+    Log("== VSL LED mulai (%d model kendaraan) ==", NMODELS);
+    InitPts();
+    SetModel(0);
     DefaultSettings();
 
     void* h = aml->GetLibHandle("libGTASA.so");
