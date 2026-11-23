@@ -142,6 +142,7 @@ struct Settings
     int shMode, shType;
     int imFlags;
     int lampSrc;           // sumber posisi lampu: 0 frame, 1 pusat geometri, 2 otomatis
+    bool shOffRot;         // geser shadow ikut diputar sesuai sudutnya (uji)
     bool imNoTex;
     float imZoff;
     int los;
@@ -208,6 +209,7 @@ static void DefaultSettings()
     g_set.shTint = true;
     g_set.shMode = 2; g_set.shType = 1;
     g_set.lampSrc = 2;
+    g_set.shOffRot = false;
     g_set.imFlags = 1; g_set.imNoTex = false; g_set.imZoff = 0.05f;
     g_set.los = 0;
     g_set.bias = -0.40f;
@@ -252,6 +254,7 @@ static void ReadCfg()
         else if (sscanf(line, "shtint=%d", &a) == 1) g_set.shTint = a != 0;
         else if (sscanf(line, "shmode=%d", &a) == 1) g_set.shMode = (a >= 0 && a <= 2) ? a : 0;
         else if (sscanf(line, "shtype=%d", &a) == 1) g_set.shType = (a >= 1 && a <= 3) ? a : 1;
+        else if (sscanf(line, "shoffrot=%d", &a) == 1) g_set.shOffRot = a != 0;
         else if (sscanf(line, "lampsrc=%d", &a) == 1) g_set.lampSrc = (a >= 0 && a <= 2) ? a : 2;
         else if (sscanf(line, "imflags=%d", &a) == 1) g_set.imFlags = (a >= 0 && a <= 31) ? a : 1;
         else if (sscanf(line, "imnotex=%d", &a) == 1) g_set.imNoTex = a != 0;
@@ -1273,7 +1276,14 @@ static void RegisterShadows(void* self, Cache* c)
         const ShadowPt& S = SHADOWS[k];
         if (S.veh != MODELS[g_mi].id || S.g >= g_NG || S.i >= MAXPTS) continue;
         if (!g_lit[g_mi][S.g][S.i] || !g_ptsOk[g_mi][S.g][S.i]) continue;
-        const float lx = g_pts[g_mi][S.g][S.i][0] + S.ox, ly = g_pts[g_mi][S.g][S.i][1] + S.oy, lz = g_pts[g_mi][S.g][S.i][2];
+        float offx = S.ox, offy = S.oy;
+        if (g_set.shOffRot)
+        {
+            const float a0 = S.ang * 0.0174532925f;
+            offx = S.ox * cosf(a0) - S.oy * sinf(a0);
+            offy = S.ox * sinf(a0) + S.oy * cosf(a0);
+        }
+        const float lx = g_pts[g_mi][S.g][S.i][0] + offx, ly = g_pts[g_mi][S.g][S.i][1] + offy, lz = g_pts[g_mi][S.g][S.i][2];
         float p[3] = { m[12] + m[0] * lx + m[4] * ly + m[8] * lz,
                        m[13] + m[1] * lx + m[5] * ly + m[9] * lz,
                        m[14] + m[2] * lx + m[6] * ly + m[10] * lz };
